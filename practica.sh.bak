@@ -1,0 +1,423 @@
+#!/bin/bash
+# ============================================================
+#   PRACTICA BIGDATA — SCRIPT UNIFICADO
+#   ETSIT UPM 2026
+# ============================================================
+
+ZONE="europe-southwest1-a"
+CLUSTER="practica-k8s"
+MANIFESTS=~/practica_creativa/k8s-gke
+PROJECT_HOME=~/practica_creativa
+SPARK_HOME=~/spark-4.1.1
+
+# Colores
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+# ============================================================
+#   FUNCIONES AUXILIARES
+# ============================================================
+
+header() {
+  echo ""
+  echo -e "${BOLD}${BLUE}============================================${NC}"
+  echo -e "${BOLD}${BLUE}  $1${NC}"
+  echo -e "${BOLD}${BLUE}============================================${NC}"
+  echo ""
+}
+
+ok()   { echo -e "  ${GREEN}✓${NC} $1"; }
+info() { echo -e "  ${CYAN}→${NC} $1"; }
+warn() { echo -e "  ${YELLOW}⚠${NC} $1"; }
+
+show_urls_docker() {
+  IP=$(curl -s ifconfig.me 2>/dev/null || echo "IP_DESCONOCIDA")
+  header "URLS DOCKER COMPOSE"
+  echo -e "  ${BOLD}Flask (predicción):${NC}"
+  echo -e "    http://$IP:5001/flights/delays/predict_kafka"
+  echo ""
+  echo -e "  ${BOLD}Spark UI:${NC}           http://$IP:8080"
+  echo -e "  ${BOLD}Grafana:${NC}            http://$IP:3000  (admin/admin)"
+  echo -e "  ${BOLD}Prometheus:${NC}         http://$IP:9090"
+  echo -e "  ${BOLD}MinIO consola:${NC}      http://$IP:9001  (minioadmin/minioadmin)"
+  echo -e "  ${BOLD}MLflow:${NC}             http://$IP:5002"
+  echo -e "  ${BOLD}Airflow:${NC}            http://$IP:8081  (admin/admin)"
+  echo ""
+}
+
+show_urls_k8s() {
+  NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="ExternalIP")].address}' 2>/dev/null)
+  FLASK_IP=$(kubectl get service flask -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
+  header "URLS KUBERNETES (GKE)"
+  if [ -n "$FLASK_IP" ]; then
+    echo -e "  ${BOLD}Flask (LoadBalancer):${NC}"
+    echo -e "    http://$FLASK_IP:5001/flights/delays/predict_kafka"
+  else
+    echo -e "  ${BOLD}Flask (NodePort):${NC}   http://$NODE_IP:30001/flights/delays/predict_kafka"
+  fi
+  echo -e "  ${BOLD}Grafana:${NC}            http://$NODE_IP:30300  (admin/admin)"
+  echo -e "  ${BOLD}Prometheus:${NC}         http://$NODE_IP:30909"
+  echo -e "  ${BOLD}MinIO consola:${NC}      http://$NODE_IP:30901  (minioadmin/minioadmin)"
+  echo -e "  ${BOLD}MLflow:${NC}             http://$NODE_IP:30502"
+  echo -e "  ${BOLD}Airflow:${NC}            http://$NODE_IP:30808  (admin/admin)"
+  echo ""
+  pause
+}
+
+# ============================================================
+#   ARRANQUE DOCKER COMPOSE
+# ============================================================
+
+arrancar_docker() {
+  header "ARRANCANDO STACK DOCKER COMPOSE"
+  cd $PROJECT_HOME
+
+  info "Levantando contenedores..."
+  docker compose up -d
+
+  info "Esperando inicialización (30s)..."
+  sleep 30
+
+  info "Esperando a que Cassandra esté lista..."
+  until docker exec cassandra cqlsh -e "describe keyspaces" > /dev/null 2>&1; do
+    echo "    Cassandra aún arrancando, esperando 10s..."
+    sleep 10
+  done
+  ok "Cassandra lista"
+
+  info "Reiniciando Flask y Spark..."
+  docker compose stop flask spark-predictor
+  docker compose start flask spark-predictor
+
+  info "Esperando inicialización final (20s)..."
+  sleep 20
+
+  info "Configurando Airflow..."
+  docker exec airflow airflow users create \
+    --username admin --password admin \
+    --firstname Admin --lastname Admin \
+    --role Admin --email admin@example.com 2>/dev/null || true
+
+  info "Configurando MinIO bucket..."
+  docker exec minio sh -c \
+    "mc alias set local http://localhost:9000 minioadmin minioadmin && mc mb local/flight-data 2>/dev/null || true" 2>/dev/null
+
+  info "Subiendo modelos a MinIO..."
+  sleep 5
+  docker cp ~/practica_creativa/models/. minio:/tmp/models/ 2>/dev/null
+  docker exec minio sh -c "mc cp --recursive /tmp/models/ local/flight-data/models/ 2>/dev/null" && ok "Modelos subidos" || warn "Error subiendo modelos"
+
+  info "Configurando Grafana datasource..."
+  sleep 5
+  curl -s -X POST http://localhost:3000/api/datasources \
+    -H "Content-Type: application/json" \
+    -u admin:admin \
+    -d '{"name":"Prometheus","type":"prometheus","url":"http://prometheus:9090","access":"proxy","isDefault":true}' \
+    > /dev/null 2>&1 || true
+
+  ok "Stack Docker listo"
+  show_urls_docker
+  pause
+}
+
+# ============================================================
+#   ARRANQUE KUBERNETES (GKE)
+# ============================================================
+
+arrancar_k8s() {
+  header "ARRANCANDO KUBERNETES GKE"
+
+  info "Autenticando con el cluster..."
+  gcloud container clusters get-credentials $CLUSTER --zone $ZONE
+
+  NODE_COUNT=$(kubectl get nodes --no-headers 2>/dev/null | wc -l)
+  if [ "$NODE_COUNT" -lt "2" ]; then
+    info "Escalando cluster a 2 nodos..."
+    gcloud container clusters resize $CLUSTER --num-nodes=2 --zone $ZONE --quiet
+    info "Esperando nodos Ready (60s)..."
+    sleep 60
+    kubectl wait --for=condition=Ready nodes --all --timeout=120s
+  else
+    ok "Cluster ya tiene $NODE_COUNT nodos activos"
+  fi
+
+  info "Creando ConfigMap del DAG de Airflow..."
+  kubectl create configmap airflow-dags \
+    --from-file=retrain_model.py=$PROJECT_HOME/docker/airflow/dags/retrain_model.py \
+    --dry-run=client -o yaml | kubectl apply -f - 2>/dev/null \
+    && ok "ConfigMap airflow-dags creado" || warn "Error creando ConfigMap"
+
+  info "Aplicando manifests..."
+  kubectl apply -f $MANIFESTS/mongo.yaml
+  kubectl apply -f $MANIFESTS/cassandra.yaml
+  kubectl apply -f $MANIFESTS/minio.yaml
+  kubectl apply -f $MANIFESTS/kafka.yaml
+  kubectl apply -f $MANIFESTS/spark.yaml
+  # spark-master-patch se aplica solo en primer despliegue
+  kubectl apply -f $MANIFESTS/flask.yaml
+  kubectl apply -f $MANIFESTS/prometheus.yaml
+  kubectl apply -f $MANIFESTS/grafana.yaml
+  kubectl apply -f $MANIFESTS/mlflow.yaml
+  kubectl apply -f $MANIFESTS/airflow.yaml
+  kubectl apply -f $MANIFESTS/spark-predictor-patch.yaml
+
+  info "Esperando pods críticos (60s)..."
+  sleep 30
+  kubectl wait --for=condition=Ready pod -l app=mongo --timeout=120s 2>/dev/null || true
+  kubectl wait --for=condition=Ready pod -l app=kafka --timeout=120s 2>/dev/null || true
+  kubectl wait --for=condition=Ready pod -l app=flask --timeout=120s 2>/dev/null || true
+
+  info "Configurando MinIO..."
+  MINIO_POD=$(kubectl get pod -l app=minio -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+  if [ -n "$MINIO_POD" ]; then
+    kubectl exec $MINIO_POD -- sh -c \
+      "mc alias set local http://localhost:9000 minioadmin minioadmin && mc mb local/flight-data 2>/dev/null || true" 2>/dev/null || true
+    ok "MinIO configurado"
+  fi
+
+  info "Esperando Cassandra lista..."
+  kubectl wait --for=condition=Ready pod -l app=cassandra --timeout=180s 2>/dev/null || true
+  sleep 10
+
+  info "Creando keyspace y tablas en Cassandra..."
+  kubectl exec deployment/cassandra -- cqlsh -e "
+CREATE KEYSPACE IF NOT EXISTS agile_data_science
+WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1};
+CREATE TABLE IF NOT EXISTS agile_data_science.origin_dest_distances (
+  origin TEXT, dest TEXT, distance DOUBLE, PRIMARY KEY (origin, dest));
+CREATE TABLE IF NOT EXISTS agile_data_science.flight_delay_classification_response (
+  origin TEXT, dest TEXT, flight_date TEXT, dep_delay DOUBLE,
+  carrier TEXT, uuid TEXT, prediction DOUBLE, timestamp TIMESTAMP,
+  PRIMARY KEY (uuid));" 2>/dev/null && ok "Keyspace y tablas creados" || warn "Error creando tablas Cassandra"
+
+  info "Importando distancias en Cassandra..."
+  python3 << 'PYEOF'
+import json
+lines = []
+with open('/home/javisaguarantona/practica_creativa/data/origin_dest_distances.jsonl') as f:
+    for line in f:
+        r = json.loads(line)
+        origin = r['Origin']
+        dest = r['Dest']
+        distance = float(r['Distance'])
+        lines.append(f"INSERT INTO agile_data_science.origin_dest_distances (origin, dest, distance) VALUES ('{origin}', '{dest}', {distance});")
+with open('/tmp/distances_k8s.cql', 'w') as f:
+    f.write('\n'.join(lines))
+print(f'Generadas {len(lines)} sentencias')
+PYEOF
+  kubectl cp /tmp/distances_k8s.cql \
+    $(kubectl get pod -l app=cassandra -o jsonpath='{.items[0].metadata.name}'):/tmp/distances.cql 2>/dev/null
+  kubectl exec deployment/cassandra -- cqlsh -f /tmp/distances.cql 2>/dev/null \
+    && ok "Distancias importadas" || warn "Error importando distancias"
+
+  info "Reiniciando Kafka y Flask para asegurar conexión..."
+  kubectl rollout restart deployment/kafka 2>/dev/null
+  sleep 15
+  kubectl rollout restart deployment/flask 2>/dev/null
+  sleep 15
+  kubectl rollout restart deployment/spark-predictor 2>/dev/null
+
+  echo ""
+  info "Estado de pods:"
+  kubectl get pods -o wide
+  echo ""
+
+  ok "Stack Kubernetes listo"
+  show_urls_k8s
+  pause
+}
+
+# ============================================================
+#   REENTRENAMIENTO
+# ============================================================
+
+reentrenar_docker() {
+  header "REENTRENAMIENTO — DOCKER"
+
+  # Paso 1: Cargar datos en Iceberg si no existen
+  info "Verificando tabla Iceberg en MinIO..."
+  TABLE_EXISTS=$(docker exec minio sh -c \
+    "mc alias set local http://localhost:9000 minioadmin minioadmin 2>/dev/null && \
+     mc ls local/flight-data/warehouse/flights/training_data/ 2>/dev/null" | grep -c "parquet" || echo "0")
+
+  if [ "$TABLE_EXISTS" -lt "1" ]; then
+    warn "Tabla Iceberg no encontrada. Cargando datos..."
+
+    # Verificar que existe el dataset
+    if [ ! -f "$PROJECT_HOME/data/simple_flight_delay_features.jsonl.bz2" ]; then
+      echo -e "  ${RED}✗ Dataset no encontrado en $PROJECT_HOME/data/${NC}"
+      echo -e "  Cópialo desde VirtualBox con gcloud compute scp"
+      return 1
+    fi
+
+    info "Copiando dataset al contenedor Spark..."
+    docker cp $PROJECT_HOME/data/simple_flight_delay_features.jsonl.bz2 spark-master:/tmp/
+
+    info "Cargando tabla Iceberg (puede tardar 2-3 min)..."
+    docker exec spark-master bash -c "
+      cat > /tmp/upload_iceberg.py << 'PYEOF'
+from pyspark.sql import SparkSession
+spark = SparkSession.builder.appName('Upload Iceberg') \
+  .config('spark.sql.extensions','org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions') \
+  .config('spark.sql.catalog.minio','org.apache.iceberg.spark.SparkCatalog') \
+  .config('spark.sql.catalog.minio.type','hadoop') \
+  .config('spark.sql.catalog.minio.warehouse','s3a://flight-data/warehouse') \
+  .config('spark.hadoop.fs.s3a.endpoint','http://minio:9000') \
+  .config('spark.hadoop.fs.s3a.access.key','minioadmin') \
+  .config('spark.hadoop.fs.s3a.secret.key','minioadmin') \
+  .config('spark.hadoop.fs.s3a.path.style.access','true') \
+  .config('spark.hadoop.fs.s3a.impl','org.apache.hadoop.fs.s3a.S3AFileSystem') \
+  .getOrCreate()
+df = spark.read.json('/tmp/simple_flight_delay_features.jsonl.bz2')
+spark.sql('CREATE NAMESPACE IF NOT EXISTS minio.flights')
+spark.sql('DROP TABLE IF EXISTS minio.flights.training_data')
+df.writeTo('minio.flights.training_data').create()
+print(f'Registros en Iceberg: {spark.table(\"minio.flights.training_data\").count()}')
+spark.stop()
+PYEOF
+      export SPARK_HOME=/opt/spark
+      /opt/spark/bin/spark-submit \
+        --conf spark.jars.ivy=/tmp/.ivy2 \
+        --packages org.apache.iceberg:iceberg-spark-runtime-4.0_2.13:1.10.1,org.apache.hadoop:hadoop-aws:3.4.2,com.amazonaws:aws-java-sdk-bundle:1.12.367 \
+        --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions \
+        --conf spark.sql.catalog.minio=org.apache.iceberg.spark.SparkCatalog \
+        --conf spark.sql.catalog.minio.type=hadoop \
+        --conf 'spark.sql.catalog.minio.warehouse=s3a://flight-data/warehouse' \
+        --conf spark.hadoop.fs.s3a.endpoint=http://minio:9000 \
+        --conf spark.hadoop.fs.s3a.access.key=minioadmin \
+        --conf spark.hadoop.fs.s3a.secret.key=minioadmin \
+        --conf spark.hadoop.fs.s3a.path.style.access=true \
+        --conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem \
+        /tmp/upload_iceberg.py 2>&1 | grep -E 'Registros|ERROR|Exception'
+    " && ok "Tabla Iceberg cargada" || warn "Error cargando tabla Iceberg"
+  else
+    ok "Tabla Iceberg ya existe"
+  fi
+
+  # Paso 2: Reentrenar
+  info "Lanzando reentrenamiento desde Iceberg (puede tardar 5-10 min)..."
+  cd $PROJECT_HOME
+
+  export SPARK_HOME=~/spark-4.1.1
+  export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+  export PATH=$SPARK_HOME/bin:$PATH
+
+  spark-submit \
+    --conf spark.driver.userClassPathFirst=true \
+    --conf spark.executor.userClassPathFirst=true \
+    --conf spark.hadoop.fs.s3a.endpoint=http://localhost:9000 \
+    --conf spark.hadoop.fs.s3a.access.key=minioadmin \
+    --conf spark.hadoop.fs.s3a.secret.key=minioadmin \
+    --conf spark.hadoop.fs.s3a.path.style.access=true \
+    --conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem \
+    --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions \
+    --conf spark.sql.catalog.minio=org.apache.iceberg.spark.SparkCatalog \
+    --conf spark.sql.catalog.minio.type=hadoop \
+    --conf "spark.sql.catalog.minio.warehouse=s3a://flight-data/warehouse" \
+    resources/train_spark_mllib_model_iceberg.py \
+    $PROJECT_HOME \
+    2>&1 | grep -E "ERROR|Exception|Traceback|guardado|saved|model|Model|SUCCESS|Saving" | grep -v "INFO\|WARN"
+
+  # Paso 3: Copiar modelos al directorio local y al contenedor Spark
+  info "Actualizando modelos locales desde MinIO..."
+  docker exec minio sh -c \
+    "mc alias set local http://localhost:9000 minioadmin minioadmin 2>/dev/null && \
+     mc cp --recursive local/flight-data/models/ /tmp/models_new/" 2>/dev/null
+  docker cp spark-master:/tmp/models_new/. $PROJECT_HOME/models/ 2>/dev/null || true
+
+  ok "Reentrenamiento completado"
+  info "Reiniciando spark-predictor para cargar nuevos modelos..."
+  docker compose restart spark-predictor
+  ok "spark-predictor reiniciado con nuevos modelos"
+  pause
+}
+
+reentrenar_k8s() {
+  header "REENTRENAMIENTO — KUBERNETES"
+  warn "El reentrenamiento en K8s ejecuta el DAG de Airflow"
+
+  info "Verificando conexión al cluster..."
+  gcloud container clusters get-credentials $CLUSTER --zone $ZONE 2>/dev/null
+
+  AIRFLOW_POD=$(kubectl get pod -l app=airflow -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+  if [ -z "$AIRFLOW_POD" ]; then
+    echo -e "  ${RED}✗ Pod de Airflow no encontrado. ¿Está el cluster arrancado?${NC}"
+    return 1
+  fi
+
+  info "Disparando DAG retrain_flight_delay_model..."
+  kubectl exec $AIRFLOW_POD -- airflow dags trigger retrain_flight_delay_model 2>/dev/null \
+    && ok "DAG disparado correctamente" \
+    || warn "Error disparando DAG — comprueba Airflow UI"
+
+  NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="ExternalIP")].address}' 2>/dev/null)
+  info "Sigue el progreso en: http://$NODE_IP:30808 → DAGs → retrain_flight_delay_model"
+  pause
+}
+
+apagar_k8s() {
+  header "APAGANDO CLUSTER GKE"
+  warn "Esto apaga los nodos del cluster (ahorra dinero)"
+  echo -n "  ¿Confirmas? (s/N): "
+  read confirm
+  if [[ "$confirm" =~ ^[sS]$ ]]; then
+    gcloud container clusters resize $CLUSTER --num-nodes=0 --zone $ZONE --quiet
+    ok "Cluster apagado"
+  else
+    info "Operación cancelada"
+  pause
+  fi
+}
+
+# ============================================================
+#   MENÚ PRINCIPAL
+# ============================================================
+
+clear
+echo ""
+echo -e "${BOLD}${CYAN}"
+echo "  ██████╗ ██╗ ██████╗     ██████╗  █████╗ ████████╗ █████╗ "
+echo "  ██╔══██╗██║██╔════╝     ██╔══██╗██╔══██╗╚══██╔══╝██╔══██╗"
+echo "  ██████╔╝██║██║  ███╗    ██║  ██║███████║   ██║   ███████║"
+echo "  ██╔══██╗██║██║   ██║    ██║  ██║██╔══██║   ██║   ██╔══██║"
+echo "  ██████╔╝██║╚██████╔╝    ██████╔╝██║  ██║   ██║   ██║  ██║"
+echo "  ╚═════╝ ╚═╝ ╚═════╝     ╚═════╝ ╚═╝  ╚═╝   ╚═╝   ╚═╝  ╚═╝"
+echo -e "${NC}"
+echo -e "  ${BOLD}Práctica Creativa Big Data — ETSIT UPM 2026${NC}"
+echo -e "  ${CYAN}Iria Lozano y Javier Saguar${NC}"
+echo ""
+echo -e "${BOLD}${BLUE}============================================${NC}"
+echo -e "  ${BOLD}ARRANQUE${NC}"
+echo -e "  ${GREEN}1)${NC} Arrancar con Docker Compose"
+echo -e "  ${GREEN}2)${NC} Arrancar con Kubernetes (GKE)"
+echo ""
+echo -e "  ${BOLD}REENTRENAMIENTO${NC}"
+echo -e "  ${GREEN}3)${NC} Reentrenar modelo — Docker"
+echo -e "  ${GREEN}4)${NC} Reentrenar modelo — Kubernetes (DAG Airflow)"
+echo ""
+echo -e "  ${BOLD}GESTIÓN${NC}"
+echo -e "  ${GREEN}5)${NC} Ver URLs actuales — Docker"
+echo -e "  ${GREEN}6)${NC} Ver URLs actuales — Kubernetes"
+echo -e "  ${GREEN}7)${NC} Apagar cluster GKE (ahorra dinero)"
+echo -e "  ${GREEN}0)${NC} Salir"
+echo -e "${BOLD}${BLUE}============================================${NC}"
+echo ""
+echo -n "  Selecciona una opción: "
+read opcion
+
+case $opcion in
+  1) arrancar_docker ;;
+  2) arrancar_k8s ;;
+  3) reentrenar_docker ;;
+  4) reentrenar_k8s ;;
+  5) show_urls_docker ;;
+  6) show_urls_k8s ;;
+  7) apagar_k8s ;;
+  0) echo ""; info "Hasta luego!"; echo "" ;;
+  *) warn "Opción no válida" ;;
+esac

@@ -1,0 +1,18 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spark-master
+spec:
+  template:
+    spec:
+      containers:
+      - name: spark-master
+        env:
+        - name: SPARK_USER
+          value: "spark"
+        - name: HOME
+          value: "/home/spark"
+        - name: SPARK_MASTER_PORT
+          value: "7077"
+        - name: SPARK_MASTER_HOST
+          value: "0.0.0.0"

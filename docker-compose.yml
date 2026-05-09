@@ -1,0 +1,218 @@
+services:
+
+  mongo:
+    image: mongo:7.0.17
+    container_name: mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    networks:
+      - practica_net
+
+  cassandra:
+    image: cassandra:4.1
+    container_name: cassandra
+    ports:
+      - "9042:9042"
+    volumes:
+      - cassandra_data:/var/lib/cassandra
+    networks:
+      - practica_net
+    healthcheck:
+      test: ["CMD", "cqlsh", "-e", "describe keyspaces"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  minio:
+    image: minio/minio
+    container_name: minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - practica_net
+
+  kafka:
+    build: ./docker/kafka
+    container_name: kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_ADVERTISED_HOST: kafka
+    networks:
+      - practica_net
+    healthcheck:
+      test: ["CMD", "/opt/kafka/bin/kafka-topics.sh", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  spark-master:
+    build: ./docker/spark
+    container_name: spark-master
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+    environment:
+      SPARK_MODE: master
+    networks:
+      - practica_net
+
+  spark-worker-1:
+    build: ./docker/spark
+    container_name: spark-worker-1
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
+    depends_on:
+      - spark-master
+    environment:
+      SPARK_MODE: worker
+      SPARK_WORKER_CORES: 2
+      SPARK_WORKER_MEMORY: 2g
+    networks:
+      - practica_net
+
+  spark-worker-2:
+    build: ./docker/spark
+    container_name: spark-worker-2
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
+    depends_on:
+      - spark-master
+    environment:
+      SPARK_MODE: worker
+      SPARK_WORKER_CORES: 2
+      SPARK_WORKER_MEMORY: 2g
+    networks:
+      - practica_net
+
+  spark-predictor:
+    build: ./docker/spark
+    container_name: spark-predictor
+    depends_on:
+      - kafka
+      - mongo
+      - cassandra
+      - spark-master
+    environment:
+      PROJECT_HOME: /app
+      CASSANDRA_HOST: cassandra
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      MONGO_URI: mongodb://mongo:27017
+      SPARK_USER: spark
+      IVY_HOME: /tmp/.ivy2
+    volumes:
+      - ./models:/app/models
+      - ./flight_prediction/target/scala-2.13:/app/jars
+      - ivy_cache:/tmp/.ivy2
+    command: >
+      /opt/spark/bin/spark-submit
+      --master spark://spark-master:7077
+      --class es.upm.dit.ging.predictor.MakePrediction
+      --packages org.apache.spark:spark-sql-kafka-0-10_2.13:4.1.1,org.mongodb.spark:mongo-spark-connector_2.13:10.4.1,com.datastax.spark:spark-cassandra-connector_2.13:3.5.1
+      --packages org.apache.spark:spark-sql-kafka-0-10_2.13:4.1.1,org.mongodb.spark:mongo-spark-connector_2.13:10.4.1,com.datastax.spark:spark-cassandra-connector_2.13:3.5.1
+      --conf spark.cassandra.connection.host=cassandra
+      --conf spark.jars.ivy=/tmp/.ivy2
+      /app/jars/flight_prediction_2.13-0.1.jar
+    networks:
+      - practica_net
+
+  flask:
+    build:
+      context: .
+      dockerfile: docker/flask/Dockerfile
+    container_name: flask
+    ports:
+      - "5001:5001"
+    depends_on:
+      - mongo
+      - cassandra
+      - kafka
+    environment:
+      PROJECT_HOME: /app
+      MONGO_URI: mongodb://mongo:27017
+      CASSANDRA_HOST: cassandra
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    networks:
+      - practica_net
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    networks:
+      - practica_net
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning
+      - ./docker/grafana/dashboards:/var/lib/grafana/dashboards
+    depends_on:
+      - prometheus
+    networks:
+      - practica_net
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.19.0
+    container_name: mlflow
+    ports:
+      - "5002:5000"
+    command: mlflow server --host 0.0.0.0 --port 5000
+    volumes:
+      - mlflow_data:/mlflow
+    networks:
+      - practica_net
+
+  airflow:
+    image: apache/airflow:2.10.4
+    container_name: airflow
+    user: root
+    ports:
+      - "8081:8080"
+    environment:
+      AIRFLOW__CORE__EXECUTOR: SequentialExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////opt/airflow/airflow.db
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__WEBSERVER__SECRET_KEY: practica_creativa_secret
+    volumes:
+      - ./docker/airflow/dags:/opt/airflow/dags
+      - airflow_data:/opt/airflow
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /home/javisaguarantona/practica_creativa/resources:/opt/spark/resources
+    command: >
+      bash -c "airflow db migrate &&
+               airflow webserver --port 8080 & airflow scheduler"
+    networks:
+      - practica_net
+
+networks:
+  practica_net:
+    driver: bridge
+
+volumes:
+  mongo_data:
+  cassandra_data:
+  minio_data:
+  ivy_cache:
+  prometheus_data:
+  grafana_data:
+  mlflow_data:
+  airflow_data:

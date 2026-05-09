@@ -1,0 +1,126 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spark-master
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: spark-master
+  template:
+    metadata:
+      labels:
+        app: spark-master
+    spec:
+      containers:
+      - name: spark-master
+        image: practica_creativa-spark-master:latest
+        imagePullPolicy: Never
+        command: ["/opt/spark/bin/spark-class"]
+        args: ["org.apache.spark.deploy.master.Master", "--host", "0.0.0.0"]
+        ports:
+        - containerPort: 7077
+        - containerPort: 8080
+        env:
+        - name: SPARK_USER
+          value: "spark"
+        - name: HOME
+          value: "/home/spark"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: spark-master
+spec:
+  selector:
+    app: spark-master
+  ports:
+  - name: spark
+    port: 7077
+    targetPort: 7077
+  - name: ui
+    port: 8080
+    targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spark-worker
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: spark-worker
+  template:
+    metadata:
+      labels:
+        app: spark-worker
+    spec:
+      containers:
+      - name: spark-worker
+        image: practica_creativa-spark-worker-1:latest
+        imagePullPolicy: Never
+        command: ["/opt/spark/bin/spark-class"]
+        args: ["org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
+        env:
+        - name: SPARK_USER
+          value: "spark"
+        - name: HOME
+          value: "/home/spark"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spark-predictor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: spark-predictor
+  template:
+    metadata:
+      labels:
+        app: spark-predictor
+    spec:
+      containers:
+      - name: spark-predictor
+        image: practica_creativa-spark-predictor:latest
+        imagePullPolicy: Never
+        command: ["/opt/spark/bin/spark-submit"]
+        args:
+        - "--master"
+        - "spark://spark-master:7077"
+        - "--class"
+        - "es.upm.dit.ging.predictor.MakePrediction"
+        - "--packages"
+        - "org.apache.spark:spark-sql-kafka-0-10_2.13:4.1.1,org.mongodb.spark:mongo-spark-connector_2.13:10.4.1,com.datastax.spark:spark-cassandra-connector_2.13:3.5.1"
+        - "--conf"
+        - "spark.cassandra.connection.host=cassandra"
+        - "--conf"
+        - "spark.jars.ivy=/tmp/.ivy2"
+        - "/app/jars/flight_prediction_2.13-0.1.jar"
+        env:
+        - name: PROJECT_HOME
+          value: "/app"
+        - name: KAFKA_BOOTSTRAP_SERVERS
+          value: "kafka:9092"
+        - name: MONGO_URI
+          value: "mongodb://mongo:27017"
+        - name: CASSANDRA_HOST
+          value: "cassandra"
+        - name: SPARK_USER
+          value: "spark"
+        - name: IVY_HOME
+          value: "/tmp/.ivy2"
+        volumeMounts:
+        - name: models
+          mountPath: /app/models
+        - name: jars
+          mountPath: /app/jars
+      volumes:
+      - name: models
+        hostPath:
+          path: /home/upm/practica_creativa/models
+      - name: jars
+        hostPath:
+          path: /home/upm/practica_creativa/flight_prediction/target/scala-2.13

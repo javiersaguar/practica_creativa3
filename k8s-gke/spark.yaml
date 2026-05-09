@@ -1,0 +1,88 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spark-master
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: spark-master
+  template:
+    metadata:
+      labels:
+        app: spark-master
+    spec:
+      containers:
+      - name: spark-master
+        image: europe-southwest1-docker.pkg.dev/project-6577bf93-e3eb-42be-8f6/practica/spark-master:latest
+        imagePullPolicy: Always
+        command: ["/opt/spark/bin/spark-class"]
+        args: ["org.apache.spark.deploy.master.Master", "--host", "0.0.0.0"]
+        ports:
+        - containerPort: 7077
+        - containerPort: 8080
+        - containerPort: 7078   # spark.driver.port
+        - containerPort: 7079   # spark.blockManager.port
+        env:
+        - name: SPARK_USER
+          value: "spark"
+        - name: HOME
+          value: "/home/spark"
+        - name: SPARK_MASTER_PORT
+          value: "7077"
+        - name: SPARK_MASTER_HOST
+          value: "spark-master"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: spark-master
+spec:
+  selector:
+    app: spark-master
+  ports:
+  - name: spark
+    port: 7077
+    targetPort: 7077
+  - name: ui
+    port: 8080
+    targetPort: 8080
+  - name: driver-ui
+    port: 4040
+    targetPort: 4040
+  - name: driver
+    port: 7078
+    targetPort: 7078
+  - name: block-manager
+    port: 7079
+    targetPort: 7079
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spark-worker
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: spark-worker
+  template:
+    metadata:
+      labels:
+        app: spark-worker
+    spec:
+      containers:
+      - name: spark-worker
+        image: europe-southwest1-docker.pkg.dev/project-6577bf93-e3eb-42be-8f6/practica/spark-worker:latest
+        imagePullPolicy: Always
+        command: ["/opt/spark/bin/spark-class"]
+        args: ["org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
+        env:
+        - name: SPARK_USER
+          value: "spark"
+        - name: HOME
+          value: "/home/spark"
+        - name: SPARK_WORKER_MEMORY
+          value: "3g"
+        - name: SPARK_WORKER_CORES
+          value: "2"
