@@ -1,368 +1,545 @@
-# Agile_Data_Code_2
+# ✈️ Flight Delay Prediction — Big Data Pipeline
 
-Code for [Agile Data Science 2.0](http://shop.oreilly.com/product/0636920051619.do), O'Reilly 2017. Now available at the [O'Reilly Store](http://shop.oreilly.com/product/0636920051619.do), on [Amazon](https://www.amazon.com/Agile-Data-Science-2-0-Applications/dp/1491960116) (in Paperback and Kindle) and on [O'Reilly Safari](https://www.safaribooksonline.com/library/view/agile-data-science/9781491960103/). Also available anywhere technical books are sold!
+> **Práctica Creativa Big Data · ETSIT UPM 2026**  
+> Predicción de retrasos de vuelos en tiempo real con arquitectura Big Data completa
 
-This is also the code for the [Realtime Predictive Analytics](http://datasyndrome.com/video) video course and [Introduction to PySpark](http://datasyndrome.com/training) live course!
+<div align="center">
 
-Have problems? Please file an issue!
+[![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python)](https://python.org)
+[![Apache Spark](https://img.shields.io/badge/Apache%20Spark-4.1.1-orange?logo=apachespark)](https://spark.apache.org)
+[![Kafka](https://img.shields.io/badge/Apache%20Kafka-KRaft-black?logo=apachekafka)](https://kafka.apache.org)
+[![Docker](https://img.shields.io/badge/Docker-Compose-blue?logo=docker)](https://docker.com)
+[![Kubernetes](https://img.shields.io/badge/Kubernetes-GKE-326CE5?logo=kubernetes)](https://kubernetes.io)
+[![MLflow](https://img.shields.io/badge/MLflow-2.19-blue?logo=mlflow)](https://mlflow.org)
+[![Airflow](https://img.shields.io/badge/Apache%20Airflow-2.10.4-017CEE?logo=apacheairflow)](https://airflow.apache.org)
+[![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
+</div>
 
-## Realtime Predictive Analytics Course
+---
 
-There is now a video course using code from chapter 8, [Realtime Predictive Analytics with Kafka, PySpark, Spark MLlib and Spark Streaming](http://datasyndrome.com/video). Check it out now at [datasyndrome.com/video](http://datasyndrome.com/video).
+## 📋 Tabla de Contenidos
 
-A free preview of the course is available at [https://vimeo.com/202336113](https://vimeo.com/202336113)
+- [Descripción del Proyecto](#-descripción-del-proyecto)
+- [Arquitectura](#-arquitectura)
+- [Stack Tecnológico](#-stack-tecnológico)
+- [Requisitos Previos](#-requisitos-previos)
+- [Instalación y Despliegue](#-instalación-y-despliegue)
+  - [Opción 1: Docker Compose (local)](#opción-1-docker-compose-local)
+  - [Opción 2: Kubernetes en GKE](#opción-2-kubernetes-en-gke)
+- [Uso del Sistema](#-uso-del-sistema)
+- [Reentrenamiento del Modelo](#-reentrenamiento-del-modelo)
+- [URLs de Acceso](#-urls-de-acceso)
+- [Errores Comunes y Soluciones](#-errores-comunes-y-soluciones)
+- [Autores](#-autores)
 
-[<img src="images/video_course_cover.png">](http://datasyndrome.com/video)
+---
 
-# The Data Value Pyramid
+## 🎯 Descripción del Proyecto
 
-Originally by Pete Warden, the data value pyramid is how the book is organized and structured. We climb it as we go forward each chapter.
+Sistema de predicción de retrasos de vuelos en tiempo real que combina batch processing para el entrenamiento de modelos ML con streaming para predicciones en vivo.
 
-![Data Value Pyramid](images/climbing_the_pyramid_chapter_intro.png)
+El dataset contiene datos del **90-95% de los vuelos con origen en EE.UU. desde 2015** (Bureau of Transportation Statistics). Se entrena un modelo **RandomForest** con PySpark MLlib que clasifica los vuelos en 4 categorías de retraso:
 
-# System Architecture
+| Categoría | Descripción |
+|-----------|-------------|
+| `0` | Adelantado (< -15 min) |
+| `1` | A tiempo / leve retraso (−15 a 0 min) |
+| `2` | Retraso moderado (0 a 30 min) |
+| `3` | Retraso severo (> 30 min) |
 
-The following diagrams are pulled from the book, and express the basic concepts in the system architecture. The front and back end architectures work together to make a complete predictive system.
-
-## Front End Architecture
-
-This diagram shows how the front end architecture works in our flight delay prediction application. The user fills out a form with some basic information in a form on a web page, which is submitted to the server. The server fills out some neccesary fields derived from those in the form like "day of year" and emits a Kafka message containing a prediction request. Spark Streaming is listening on a Kafka queue for these requests, and makes the prediction, storing the result in MongoDB. Meanwhile, the client has received a UUID in the form's response, and has been polling another endpoint every second. Once the data is available in Mongo, the client's next request picks it up. Finally, the client displays the result of the prediction to the user! 
-
-This setup is extremely fun to setup, operate and watch. Check out chapters 7 and 8 for more information!
-
-![Front End Architecture](images/front_end_realtime_architecture.png)
-
-## Back End Architecture
-
-The back end architecture diagram shows how we train a classifier model using historical data (all flights from 2015) on disk (HDFS or Amazon S3, etc.) to predict flight delays in batch in Spark. We save the model to disk when it is ready. Next, we launch a Kafka queue. We use Spark Streaming to load the classifier model, and then listen for prediction requests in a Kafka queue. When a prediction request arrives, Spark Streaming makes the prediction, storing the result in MongoDB where the web application can pick it up.
-
-This architecture is extremely powerful, and it is a huge benefit that we get to use the same code in batch and in realtime with PySpark Streaming.
-
-![Backend Architecture](images/back_end_realtime_architecture.png)
-
-# Screenshots
-
-Below are some examples of parts of the application we build in this book and in this repo. Check out the book for more!
-
-## Airline Entity Page
-
-Each airline gets its own entity page, complete with a summary of its fleet and a description pulled from Wikipedia.
-
-![Airline Page](images/airline_page_enriched_wikipedia.png)
-
-## Airplane Fleet Page
-
-We demonstrate summarizing an entity with an airplane fleet page which describes the entire fleet.
-
-![Airplane Fleet Page](images/airplanes_page_chart_v1_v2.png)
-
-## Flight Delay Prediction UI
-
-We create an entire realtime predictive system with a web front-end to submit prediction requests.
-
-![Predicting Flight Delays UI](images/predicting_flight_kafka_waiting.png)
-
-## Downloading Data
-
-Once the server comes up, download the data and you are ready to go. First change directory into the `practica_creativa` directory.
+### Flujo completo
 
 ```
+Usuario (Web)
+    │ POST /flights/delays/predict/classify_realtime
+    ▼
+Flask (puerto 5001)
+    │ produce → Kafka topic: flight-delay-ml-request
+    ▼
+Spark Streaming (predictor)
+    │ consume → predice con RandomForest
+    │ publica → Kafka topic: flight-delay-ml-response
+    │ guarda  → MongoDB + Cassandra
+    ▼
+Flask (kafka_consumer_thread)
+    │ WebSocket emit → Navegador
+    ▼
+Usuario recibe predicción en tiempo real
+```
+
+---
+
+## 🏗️ Arquitectura
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        BATCH (Entrenamiento)                     │
+│                                                                   │
+│  Airflow DAG ──► Spark MLlib ──► MLflow (tracking)              │
+│       │              │                                           │
+│       │         lee datos de                                     │
+│       │         Iceberg/MinIO ◄── Data Lakehouse (457k registros)│
+│       │              │                                           │
+│       └──────────────► guarda modelos ──► MinIO /models/         │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│                      REALTIME (Predicción)                       │
+│                                                                   │
+│  Flask ──► Kafka ──► Spark Streaming ──► Kafka response          │
+│                            │                                     │
+│                    ┌───────┴────────┐                            │
+│                  MongoDB        Cassandra                        │
+│                 (predicciones) (predicciones + distancias)       │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│                      OBSERVABILIDAD                              │
+│                                                                   │
+│  Flask /metrics ──► Prometheus ──► Grafana Dashboard            │
+│  MLflow UI (experimentos y runs de entrenamiento)                │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 🛠️ Stack Tecnológico
+
+| Componente | Tecnología | Versión |
+|------------|------------|---------|
+| Web Server | Flask + SocketIO | 3.x |
+| Stream Processing | Apache Spark Streaming | 4.1.1 |
+| Message Broker | Apache Kafka (KRaft) | 3.x |
+| ML Training | PySpark MLlib (RandomForest) | 4.1.1 |
+| Data Lakehouse | Apache Iceberg + MinIO | 1.10.1 |
+| ML Tracking | MLflow | 2.19.0 |
+| Workflow | Apache Airflow | 2.10.4 |
+| NoSQL | MongoDB + Cassandra | latest |
+| Monitoring | Prometheus + Grafana | latest |
+| Containerización | Docker Compose / Kubernetes GKE | — |
+
+---
+
+## 📦 Requisitos Previos
+
+### Para Docker Compose
+
+```bash
+# Sistema operativo: Ubuntu 20.04+ / Debian
+# Recursos mínimos recomendados: 8 GB RAM, 4 cores
+
+# Docker Engine
+curl -fsSL https://get.docker.com | sh
+sudo usermod -aG docker $USER
+
+# Docker Compose v2
+sudo apt-get install docker-compose-plugin
+
+# Java 17 (para spark-submit local)
+sudo apt install openjdk-17-jdk
+
+# Python 3.10+
+sudo apt install python3 python3-pip
+```
+
+### Para Kubernetes (GKE)
+
+```bash
+# Google Cloud SDK
+curl https://sdk.cloud.google.com | bash
+
+# kubectl
+sudo apt-get install kubectl
+
+# Proyecto GCP con billing activo
+# Cluster GKE con al menos 2 nodos e2-standard-4
+```
+
+---
+
+## 🚀 Instalación y Despliegue
+
+### 1. Clonar el repositorio
+
+```bash
+git clone https://github.com/Big-Data-ETSIT/practica_creativa
 cd practica_creativa
 ```
-Now download the data.
 
-For the [Realtime Predictive Analytics](http://datasyndrome.com/video)  run: 
+### 2. Descargar el dataset
 
-```
-resources/download_data.sh
-```
-## Installation
-
-You need to install each component included in the architecture. 
-The following list includes some links with the installation procedure for each component:
-
- - [Intellij](https://www.jetbrains.com/help/idea/installation-guide.html) (jdk 17) or VsCode
- - [Pyhton3](https://realpython.com/installing-python/) (Suggested version 3.7) 
- - [PIP](https://pip.pypa.io/en/stable/installing/)
- - [SDKMAN](https://sdkman.io/install/)
- - [SBT](https://www.scala-sbt.org/release/docs/Setup.html) 
- - [MongoDB](https://docs.mongodb.com/manual/installation/) (Suggested version 7.0.17, if it fails try with mongo 4.0)
-   In the ETSIT labs mongo is alrady installed
-   
-   Although you can install it directly with docker:
-   ```
-   $ docker run --name mongo -d -p 27017:27017 mongo:7.0.17 #or mongo:4.0 if mongo 6.0 fails
-   ```
- - [Spark](https://spark.apache.org/docs/latest/) (Mandatory version 4.1.1 -> you can install it with sdkman)
- - [Scala](https://www.scala-lang.org)(Mandatory version 2.13.0 -> you can install it with sdkman)
- - [Kafka](https://kafka.apache.org/quickstart) (Mandatory version kafka_2.13_4.2.0 with KRaft)
-
- ### Create and use Python venv
-
- ```
- python3 -m venv env
- source env/bin/activate
-
- ```
- 
- ### Install python libraries
- 
- ```
-  pip install -r requirements.txt
- ```
- ### Check Java installation
- 
- Open a console and use sdk man to check the installation of java:
- 
- ```
-   sdk list java
- ```
- In case you have other version installed, chage or instal de jdk 17
- ```
-   sdk install java 17.0.14-amzn
- ```
- Check the JAVA_HOME env:
- ```
-   echo ${JAVA_HOME}
- ```
- You should have an output similar to this:
- ```
-   /Users/admin/.sdkman/candidates/java/current
- ```
-
-  ### Start Kafka
-  
-  Open a console and go to the downloaded Kafka directory and run:
-  ```
-    KAFKA_CLUSTER_ID="$(bin/kafka-storage.sh random-uuid)"
-  ```
-  ```
-    bin/kafka-storage.sh format -t $KAFKA_CLUSTER_ID -c config/kraft/server.properties  
-  ```
-  
-  ```
-    bin/kafka-server-start.sh config/kraft/server.properties
-   ```
-   open a new console in the same directory and create a new topic :
-  ```
-      bin/kafka-topics.sh \
-        --create \
-        --bootstrap-server localhost:9092 \
-        --replication-factor 1 \
-        --partitions 1 \
-        --topic flight-delay-ml-request
-   ```
-   You should see the following message:
-  ```
-    Created topic "flight-delay-ml-request".
-  ```
-  You can see the topic we created with the list topics command:
-  ```
-      bin/kafka-topics.sh --bootstrap-server localhost:9092 --list
-  ```
-  Output:
-  ```
-    flight-delay-ml-request
-  ```
-  (Optional) You can oen a new console with a consumer in order to see the messeges sent to that topic
-  ```
-  bin/kafka-console-consumer.sh \
-      --bootstrap-server localhost:9092 \
-      --topic flight-delay-ml-request \
-      --from-beginning
-  ```
-  ## Import the distance records to MongoDB
-  Check if you have Mongo up and running:
-  ```
-  service mongod status # if installed directly
-  docker ps # if installed with docker
-  docker logs mongo # if installed with docker but docker ps does not show mongo
-  ```
-  Output (if installed directly):
-  ```
-  mongod.service - MongoDB Database Server
-     Loaded: loaded (/lib/systemd/system/mongod.service; disabled; vendor preset: 
-     Active: active (running) since Tue 2019-10-01 14:58:53 CEST; 2h 11min ago
-       Docs: https://docs.mongodb.org/manual
-   Main PID: 7816 (mongod)
-     CGroup: /system.slice/mongod.service
-             └─7816 /usr/bin/mongod --config /etc/mongod.conf
-  
-  oct 01 14:58:53 amunoz systemd[1]: Started MongoDB Database Server.
-  ```
-  > [!NOTE]  
-  >In case you don't have run mongo with docker and is the first time you install monog or your are using the laboratory perform the following steps:
-  >Create a data directory for storing the mongo data inseide of the `practica_creativa` folder:
-  >```
-  >mkdir data_mongo
-  >```
-  >Open a terminal and run the mongo daemon for starting the server:
-  >```
-  >mongod —port 27017 —dbpath ./data_mongo —oplogSize 50
-  >```
-  >Don't close the terminar in any moment otherwise teh mongo server will stop.
-
-  In other terminal run the import_distances.sh script. If mongo was installed with docker you have to copy the /data downloaded inside the mongo container and check how to import a .jsonl (import_distances.sh)
-  ```
-  ./resources/import_distances.sh
-  ```
-  Output:
-  ```
-  2019-10-01T17:06:46.957+0200	connected to: mongodb://localhost/
-  2019-10-01T17:06:47.035+0200	4696 document(s) imported successfully. 0 document(s) failed to import.
-  MongoDB shell version v4.2.0
-  connecting to: mongodb://127.0.0.1:27017/agile_data_science?compressors=disabled&gssapiServiceName=mongodb
-  Implicit session: session { "id" : UUID("9bda4bb6-5727-4e91-8855-71db2b818232") }
-  MongoDB server version: 7.0.17
-  {
-  	"createdCollectionAutomatically" : false,
-  	"numIndexesBefore" : 1,
-  	"numIndexesAfter" : 2,
-  	"ok" : 1
-  }
-
-  ```
-  ## Train and Save de the model with PySpark mllib
-  In a console go to the base directory of the cloned repo, then go to the `practica_creativa` directory
-  ```
-    cd practica_creativa
-  ```
-  > [!NOTE]  
-  > You only need to set JAVA_HOME if you haven't done before.
-  >Set the `JAVA_HOME` env variable with the path of java installation directory, for example:
-  >```
-  >  export JAVA_HOME=/usr/lib/jvm/java-1.8.0-openjdk-amd64
-  >```
-  
-  Set the `SPARK_HOME` env variable with the path of your Spark installation folder, for example:
-  ```
-    export SPARK_HOME=/opt/spark
-    # if installed with sdkman you can get the installation folder with 'whereis spark-submit'
-  ```
-  Now, execute the script `train_spark_mllib_model.py`
-  ```
-      python3 resources/train_spark_mllib_model.py .
-  ```
-  As result, some files will be saved in the `models` folder 
-  
-  ```
-  ls ../models
-  
-  ```   
-  ## Run Flight Predictor
-  First, you need to change the base_paht val in the MakePrediction scala class,
-  change that val for the path where you clone repo is placed:
-  ```
-    val base_path= "/home/user/Desktop/practica_creativa"
-    
-  ``` 
-  Then run the code using Intellij, sbt, or spark-submit with their respective arguments. 
-  
-Please, note that in order to use spark-submit you first need to compile the code and build a JAR file using sbt. Also, when running the spark-submit command, you have to add at least these two packages with the --packages option:
-  ```
-  --packages org.mongodb.spark:mongo-spark-connector_2.12:10.4.1,org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.3
-     
-  ``` 
-   Be carefull with the packages version because if you are using another version of spark, kafka or mongo you have to choose the correspondent version to your installation. This packages work with Spark 3.5.3, kafka_2.12-3.9.0 and mongo superior to 6.0
-  
-  ## Start the prediction request Web Application
-  
-  Set the `PROJECT_HOME` env variable with the path of you cloned repository, for example:
-   ```
-  export PROJECT_HOME=/home/user/Desktop/practica_creativa
-   ```
-  Go to the `web` directory under `resources` and execute the flask web application file `predict_flask.py`:
-  ```
-  cd practica_creativa/resources/web
-  python3 predict_flask.py
-  
-  ```
-  Now, visit http://localhost:5000/flights/delays/predict_kafka and, for fun, open the JavaScript console. Enter a nonzero departure delay, an ISO-formatted date (I used 2016-12-25, which was in the future at the time I was writing this), a valid carrier code (use AA or DL if you don’t know one), an origin and destination (my favorite is ATL → SFO), and a valid flight number (e.g., 1519), and hit Submit. Watch the debug output in the JavaScript console as the client polls for data from the response endpoint at /flights/delays/predict/classify_realtime/response/.
-  
-  Quickly switch windows to your Spark console. Within 10 seconds, the length we’ve configured of a minibatch, you should see something like the following:
-  
-  ## Check the predictions records inserted in MongoDB
-  ```
-   $ mongo
-   > use use agile_data_science;
-   > db.flight_delay_ml_response.find();
-  
-  ```
-  You must have a similar output as:
-  
-  ```
-  { "_id" : ObjectId("5d8dcb105e8b5622696d6f2e"), "Origin" : "ATL", "DayOfWeek" : 6, "DayOfYear" : 360, "DayOfMonth" : 25, "Dest" : "SFO", "DepDelay" : 290, "Timestamp" : ISODate("2019-09-27T08:40:48.175Z"), "FlightDate" : ISODate("2016-12-24T23:00:00Z"), "Carrier" : "AA", "UUID" : "8e90da7e-63f5-45f9-8f3d-7d948120e5a2", "Distance" : 2139, "Route" : "ATL-SFO", "Prediction" : 3 }
-  { "_id" : ObjectId("5d8dcba85e8b562d1d0f9cb8"), "Origin" : "ATL", "DayOfWeek" : 6, "DayOfYear" : 360, "DayOfMonth" : 25, "Dest" : "SFO", "DepDelay" : 291, "Timestamp" : ISODate("2019-09-27T08:43:20.222Z"), "FlightDate" : ISODate("2016-12-24T23:00:00Z"), "Carrier" : "AA", "UUID" : "d3e44ea5-d42c-4874-b5f7-e8a62b006176", "Distance" : 2139, "Route" : "ATL-SFO", "Prediction" : 3 }
-  { "_id" : ObjectId("5d8dcbe05e8b562d1d0f9cba"), "Origin" : "ATL", "DayOfWeek" : 6, "DayOfYear" : 360, "DayOfMonth" : 25, "Dest" : "SFO", "DepDelay" : 5, "Timestamp" : ISODate("2019-09-27T08:44:16.432Z"), "FlightDate" : ISODate("2016-12-24T23:00:00Z"), "Carrier" : "AA", "UUID" : "a153dfb1-172d-4232-819c-8f3687af8600", "Distance" : 2139, "Route" : "ATL-SFO", "Prediction" : 1 }
-
-
+```bash
+mkdir -p data
+# Descargar simple_flight_delay_features.jsonl.bz2 desde:
+# https://github.com/Big-Data-ETSIT/practica_creativa
+# y colocarlo en ./data/
 ```
 
-### Train the model with Apache Airflow (optional and only for the final submission not the middle one)
+### 3. Dar permisos al script
 
-- The version of Apache Airflow used is the 2.1.4 and it is installed with pip. For development it uses SQLite as database but it is not recommended for production. For the laboratory SQLite is sufficient.
-
-- Install python libraries for Apache Airflow (suggested Python 3.7)
-
-```shell
-cd resources/airflow
-pip install -r requirements.txt -c constraints.txt
+```bash
+chmod +x practica.sh
 ```
-- Set the `PROJECT_HOME` env variable with the path of you cloned repository, for example:
+
+---
+
+### Opción 1: Docker Compose (local)
+
+```bash
+./practica.sh
+# Seleccionar opción 1: "Arrancar con Docker Compose"
 ```
-export PROJECT_HOME=/home/user/Desktop/practica_creativa
+
+El script realiza automáticamente:
+- ✅ Levanta los 13 servicios Docker
+- ✅ Espera a que Cassandra esté lista
+- ✅ Configura MinIO con el bucket `flight-data`
+- ✅ Sube los modelos pre-entrenados a MinIO
+- ✅ Carga las distancias origin-dest en Cassandra
+- ✅ Instala MLflow en los workers de Spark
+- ✅ Dispara el DAG de reentrenamiento inicial en Airflow
+
+> ⏱️ **Tiempo estimado de arranque**: 3-5 minutos
+
+---
+
+### Opción 2: Kubernetes en GKE
+
+#### Preparación del cluster
+
+```bash
+# Autenticarse con GCP
+gcloud auth login
+gcloud config set project TU_PROJECT_ID
+
+# Crear cluster (si no existe)
+gcloud container clusters create practica-k8s \
+  --zone europe-southwest1-a \
+  --num-nodes 2 \
+  --machine-type e2-standard-4
+
+# O escalar uno existente
+gcloud container clusters resize practica-k8s \
+  --num-nodes=2 --zone europe-southwest1-a --quiet
 ```
-- Configure airflow environment
 
-```shell
-export AIRFLOW_HOME=~/airflow
-mkdir $AIRFLOW_HOME/dags
-mkdir $AIRFLOW_HOME/logs
-mkdir $AIRFLOW_HOME/plugins
+#### Variables a configurar en `practica.sh`
 
-airflow users create \
-    --username admin \
-    --firstname Jack \
-    --lastname  Sparrow\
-    --role Admin \
-    --email example@mail.org
+Edita las primeras líneas del script con tus valores:
+
+```bash
+ZONE="europe-southwest1-a"          # Zona de tu cluster
+CLUSTER="practica-k8s"              # Nombre del cluster
+PROJECT_HOME=~/practica_creativa    # Directorio del proyecto
 ```
-- Start airflow scheduler and webserver
-```shell
-airflow webserver --port 8080
-airflow sheduler
+
+Y en los manifests `k8s-gke/*.yaml`, actualiza el registry de imágenes:
+
+```yaml
+image: TU_REGION-docker.pkg.dev/TU_PROJECT_ID/practica/spark-master:latest
 ```
-Vistit http://localhost:8080/home for the web version of Apache Airflow.
 
-- The DAG is defined in `resources/airflow/setup.py`.
-- **TODO**: add the DAG and execute it to train the model (see the official documentation of Apache Airflow to learn how to exectue and add a DAG with the airflow command).
-- **TODO**: explain the architecture of apache airflow (see the official documentation of Apache Airflow).
-- **TODO**: analyzing the setup.py: what happens if the task fails?, what is the peridocity of the task?
+#### Construir y subir imágenes
 
-![Apache Airflow DAG success](images/airflow.jpeg)
+```bash
+# Configurar Docker para usar Artifact Registry
+gcloud auth configure-docker TU_REGION-docker.pkg.dev
 
+# Construir y publicar imágenes
+docker build -t TU_REGION-docker.pkg.dev/TU_PROJECT/practica/spark-master:latest \
+  -f docker/spark/Dockerfile docker/spark/
+docker push TU_REGION-docker.pkg.dev/TU_PROJECT/practica/spark-master:latest
 
+# Repetir para spark-worker, flask, spark-predictor
+```
 
-## Evaluation
+#### Arrancar en K8s
 
-### First stage
-Evaluation in class where the student/pair hast to show de basic deployment working (only the prediction phase)
+```bash
+./practica.sh
+# Seleccionar opción 2: "Arrancar con Kubernetes (GKE)"
+```
 
-### Second stage
+El script realiza automáticamente:
+- ✅ Autentica con el cluster GKE
+- ✅ Aplica todos los manifests de `k8s-gke/`
+- ✅ Configura MinIO con PVC de 10Gi
+- ✅ Carga Iceberg con 457k registros de entrenamiento
+- ✅ Configura Cassandra con keyspace y tablas
+- ✅ Descarga `kubectl` al pod de Airflow
+- ✅ Instala MLflow en spark-master
+- ✅ Arranca el scheduler de Airflow
 
-One member of the pair must upload the compressed code in a .zip file, **WITHOUT the folders models/, flight_prediction/target, and data/**. Inside the zip file, **a PDF must be included indicating the members of the pair and which parts of the assignment have been completed (not how they were done)**. Maximum length: one page.
+> ⏱️ **Tiempo estimado de arranque**: 5-10 minutos
 
-Although the submission deadline is January 10th, we recommend finishing it before the written exam, as some questions may be related to the final project. The project will be assessed orally in the following weeks. Time slots will be opened close to the date, and if anyone wishes to do it earlier, they should contact the course coordinator’s email.
+> ⚠️ **Importante**: Recuerda apagar el cluster cuando no lo uses (opción 7) para ahorrar créditos GCP.
 
-Several notes:
+---
 
-1) The project must work correctly; otherwise, it will be graded with a 0. The same applies to each improvement. If an improvement is incomplete, it will be graded with a 0.
+## 💻 Uso del Sistema
 
-2) A minimum grade of 5 out of 10 is required to pass the course.
+### Menú principal
 
-3) The project and the oral exam can be done in pairs, but the grade will be individual. This means that questions will be asked to both members of the pair, and if they are not answered adequately, the project will not be passed.
+```
+============================================
+  ARRANQUE
+  1) Arrancar con Docker Compose
+  2) Arrancar con Kubernetes (GKE)
 
+  REENTRENAMIENTO
+  3) Reentrenar modelo -- Docker
+  4) Reentrenar modelo -- Kubernetes (DAG Airflow)
 
+  GESTION
+  5) Ver URLs actuales -- Docker
+  6) Ver URLs actuales -- Kubernetes
+  7) Apagar cluster GKE (ahorra dinero)
+  8) Parar Docker Compose
 
+  DIAGNOSTICO & LOGS
+  9)  Diagnostico del sistema
+  10) Ver logs por servicio
 
+  0) Salir
+============================================
+```
+
+### Hacer una predicción
+
+1. Abre la interfaz web de Flask
+2. Introduce los datos del vuelo:
+   - **Departure Delay**: retraso inicial en minutos
+   - **Carrier**: código de aerolínea (AA, DL, UA...)
+   - **Date**: fecha del vuelo
+   - **Origin**: aeropuerto de origen (ATL, JFK...)
+   - **Destination**: aeropuerto de destino
+3. Pulsa **Submit**
+4. La predicción aparece en tiempo real vía WebSocket
+
+---
+
+## 🔄 Reentrenamiento del Modelo
+
+El reentrenamiento se gestiona mediante un DAG de Apache Airflow (`retrain_flight_delay_model`) con planificación `@weekly`.
+
+```bash
+# Reentrenar manualmente (Docker)
+./practica.sh → opción 3
+
+# Reentrenar manualmente (K8s)
+./practica.sh → opción 4
+```
+
+El proceso completo:
+
+```
+Airflow DAG trigger
+    │
+    ▼
+spark-submit train_spark_mllib_model_iceberg.py
+    │
+    ├── Lee datos de Iceberg (MinIO warehouse)
+    ├── Bucketiza ArrDelay en 4 categorías
+    ├── StringIndexer para Carrier, Origin, Dest, Route
+    ├── VectorAssembler → Features_vec
+    ├── RandomForestClassifier.fit()
+    ├── Guarda modelos → s3a://flight-data/models/
+    ├── Evalúa accuracy
+    └── Registra métricas en MLflow
+```
+
+Los modelos guardados en MinIO:
+
+```
+flight-data/models/
+├── arrival_bucketizer_2.0.bin
+├── numeric_vector_assembler.bin
+├── spark_random_forest_classifier.flight_delays.5.0.bin
+├── string_indexer_model_Carrier.bin
+├── string_indexer_model_Dest.bin
+├── string_indexer_model_Origin.bin
+└── string_indexer_model_Route.bin
+```
+
+---
+
+## 🌐 URLs de Acceso
+
+### Docker Compose
+
+| Servicio | URL | Credenciales |
+|----------|-----|--------------|
+| **Flask (predicción)** | `http://IP:5001/flights/delays/predict_kafka` | — |
+| Spark UI | `http://IP:8080` | — |
+| Grafana | `http://IP:3000` | admin/admin |
+| Prometheus | `http://IP:9090` | — |
+| MinIO Console | `http://IP:9001` | minioadmin/minioadmin |
+| MLflow | `http://IP:5002` | — |
+| Airflow | `http://IP:8081` | admin/admin |
+
+### Kubernetes (GKE)
+
+| Servicio | Puerto NodePort | Credenciales |
+|----------|----------------|--------------|
+| **Flask** | `NODE_IP:30001` | — |
+| Grafana | `NODE_IP:30300` | admin/admin |
+| Prometheus | `NODE_IP:30909` | — |
+| MinIO Console | `NODE_IP:30901` | minioadmin/minioadmin |
+| MLflow | `NODE_IP:30502` | — |
+| Airflow | `NODE_IP:30808` | admin/admin |
+
+> 💡 Obtén la IP del nodo con: `kubectl get nodes -o wide`
+
+---
+
+## 🐛 Errores Comunes y Soluciones
+
+### Docker Compose
+
+<details>
+<summary>❌ <code>Cassandra no disponible</code> al arrancar</summary>
+
+Cassandra tarda varios minutos en inicializarse. El script espera automáticamente, pero si falla:
+
+```bash
+docker logs cassandra --tail=50
+# Esperar hasta ver: "Created default superuser role 'cassandra'"
+docker exec cassandra cqlsh -e "describe keyspaces"
+```
+</details>
+
+<details>
+<summary>❌ Predicción no aparece en la web (spinner infinito)</summary>
+
+Verificar que Spark Streaming está procesando:
+```bash
+docker logs spark-predictor --tail=50 | grep -E "Stream started|ERROR"
+# Si no está activo:
+docker compose restart spark-predictor
+```
+</details>
+
+<details>
+<summary>❌ <code>ModuleNotFoundError: No module named 'mlflow'</code> en reentrenamiento</summary>
+
+```bash
+docker exec spark-master pip install mlflow
+# O reconstruir la imagen (ya incluye mlflow en el Dockerfile)
+docker compose build spark-master spark-worker-1 spark-worker-2
+```
+</details>
+
+---
+
+### Kubernetes (GKE)
+
+<details>
+<summary>❌ Spark training falla con <code>RECEIVED SIGNAL TERM</code></summary>
+
+El driver Spark necesita puertos fijos para comunicarse con los executors. Verificar que el Service `spark-master` expone los puertos 7078 y 7079:
+
+```bash
+kubectl get svc spark-master
+# Debe mostrar: 7077/TCP,8080/TCP,7078/TCP,7079/TCP
+```
+
+Si faltan, aplicar el manifest actualizado:
+```bash
+kubectl apply -f k8s-gke/spark.yaml
+```
+</details>
+
+<details>
+<summary>❌ Airflow DAG en <code>queued</code> sin ejecutarse</summary>
+
+El scheduler de Airflow muere frecuentemente con SQLite. Reiniciarlo:
+
+```bash
+AIRFLOW_POD=$(kubectl get pod -l app=airflow --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
+kubectl exec $AIRFLOW_POD -- bash -c "nohup airflow scheduler >> /tmp/scheduler.log 2>&1 &"
+```
+</details>
+
+<details>
+<summary>❌ <code>cannot exec into a container in a completed pod</code></summary>
+
+El pod de spark-master se reinició y el DAG tiene el nombre del pod antiguo. El DAG ya incluye `--field-selector=status.phase=Running` para evitarlo. Si persiste:
+
+```bash
+kubectl rollout restart deployment/spark-master
+# Esperar y re-disparar el DAG
+```
+</details>
+
+<details>
+<summary>❌ MLflow vacío tras reiniciar el pod</summary>
+
+MLflow necesita el PVC para persistir datos. Verificar que está aplicado:
+
+```bash
+kubectl get pvc mlflow-pvc
+# Si no existe:
+kubectl apply -f k8s-gke/mlflow.yaml
+```
+</details>
+
+<details>
+<summary>❌ <code>App requires more resource than any of Workers could have</code></summary>
+
+Los workers no tienen suficiente memoria libre. Añadir límites explícitos al spark-submit:
+
+```
+--conf spark.executor.memory=1g
+--conf spark.executor.cores=1
+--conf spark.executor.memoryOverhead=256m
+```
+Estos parámetros ya están configurados en el DAG de K8s.
+</details>
+
+<details>
+<summary>❌ Pod Airflow en CrashLoopBackOff por OOM</summary>
+
+Aumentar el límite de memoria:
+
+```bash
+kubectl patch deployment airflow --patch '{
+  "spec":{"template":{"spec":{"containers":[{
+    "name":"airflow",
+    "resources":{"requests":{"memory":"2Gi"},"limits":{"memory":"3Gi"}}
+  }]}}}}'
+```
+</details>
+
+---
+
+## 👥 Autores
+
+<table>
+  <tr>
+    <td align="center">
+      <b>Javier Saguar Antona</b><br/>
+      <a href="https://github.com/javisaguarantona">@javisaguarantona</a>
+    </td>
+    <td align="center">
+      <b>Iria Lozano</b><br/>
+      ETSIT UPM 2026
+    </td>
+  </tr>
+</table>
+
+---
+
+## 📚 Referencias
+
+- [Repositorio base de la práctica](https://github.com/Big-Data-ETSIT/practica_creativa)
+- [Agile Data Science 2.0 — Russell Jurney](https://github.com/rjurney/Agile_Data_Code_2)
+- [Bureau of Transportation Statistics](https://www.transtats.bts.gov/)
+- [Apache Spark MLlib](https://spark.apache.org/mllib/)
+- [Apache Iceberg](https://iceberg.apache.org/)
+
+---
+
+<div align="center">
+<sub>Práctica Creativa Big Data · ETSIT UPM 2026</sub>
+</div>
