@@ -134,6 +134,9 @@ arrancar_docker() {
   docker cp ~/practica_creativa/models/. minio:/tmp/models/ 2>/dev/null
   docker exec minio sh -c "mc cp --recursive /tmp/models/ local/flight-data/models/ 2>/dev/null" && ok "Modelos subidos" || warn "Error subiendo modelos"
 
+  info "Limpiando checkpoints de Spark Streaming..."
+  docker compose run --rm --entrypoint bash spark-predictor -c "rm -rf /tmp/checkpoint_*" 2>/dev/null || true
+  ok "Checkpoints limpiados"
   info "Arrancando Spark predictor en modo cluster..."
   docker compose start spark-predictor
 
@@ -265,6 +268,25 @@ PYEOF
   kubectl rollout restart deployment/flask 2>/dev/null
   sleep 15
   kubectl rollout restart deployment/spark-predictor 2>/dev/null
+
+  info "Verificando que el predictor K8s arranca correctamente..."
+  sleep 60
+  PREDICTOR_POD=$(kubectl get pod -l app=spark-predictor --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+  if [ -n "$PREDICTOR_POD" ]; then
+    ASSERT_ERR=$(kubectl logs $PREDICTOR_POD 2>/dev/null | grep -c "AssertionError\|Decision Tree load failed" 2>/dev/null)
+    if [ "$ASSERT_ERR" -gt "0" ]; then
+      warn "Modelos incompatibles detectados - lanzando reentrenamiento automatico..."
+      SPARK_POD=$(kubectl get pod -l app=spark-master --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+      AIRFLOW_POD=$(kubectl get pod -l app=airflow --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+      kubectl cp $PROJECT_HOME/resources/train_spark_mllib_model_iceberg.py $SPARK_POD:/tmp/train_spark_mllib_model_iceberg.py 2>/dev/null
+      kubectl exec $AIRFLOW_POD -- bash -c "nohup airflow scheduler >> /tmp/scheduler.log 2>&1 &" 2>/dev/null
+      sleep 5
+      kubectl exec $AIRFLOW_POD -- airflow dags trigger retrain_flight_delay_model 2>/dev/null
+      ok "Reentrenamiento disparado - el predictor estara listo en ~10 min"
+    else
+      ok "Predictor K8s arrancado correctamente"
+    fi
+  fi
 
   info "Descargando kubectl binary en la VM..."
   if [ ! -f /tmp/kubectl ]; then

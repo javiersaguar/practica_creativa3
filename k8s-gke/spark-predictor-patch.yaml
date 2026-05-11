@@ -55,6 +55,9 @@ spec:
         - "--conf"
         - "spark.hadoop.fs.s3a.aws.credentials.provider=org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider"
         - "/app/jars/flight_prediction_2.13-0.1.jar"
+        volumeMounts:
+        - name: ivy-cache
+          mountPath: /tmp/.ivy2
         env:
         - name: PROJECT_HOME
           value: "/app"
@@ -76,6 +79,10 @@ spec:
           value: "spark"
         - name: IVY_HOME
           value: "/tmp/.ivy2"
+      volumes:
+      - name: ivy-cache
+        persistentVolumeClaim:
+          claimName: ivy-cache-pvc
 ---
 apiVersion: v1
 kind: Service
