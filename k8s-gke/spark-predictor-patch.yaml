@@ -39,7 +39,7 @@ spec:
         - "--conf"
         - "spark.cassandra.connection.host=cassandra"
         - "--conf"
-        - "spark.jars.ivy=/tmp/.ivy2"
+        - "spark.jars.ivy=/home/spark/.ivy2"
         - "--conf"
         - "spark.hadoop.fs.s3a.endpoint=http://minio:9000"
         - "--conf"
@@ -78,7 +78,7 @@ spec:
         - name: SPARK_USER
           value: "spark"
         - name: IVY_HOME
-          value: "/tmp/.ivy2"
+          value: "/home/spark/.ivy2"
       volumes:
       - name: ivy-cache
         persistentVolumeClaim:
