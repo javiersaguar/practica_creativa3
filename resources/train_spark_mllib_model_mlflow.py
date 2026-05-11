@@ -182,6 +182,9 @@ def main(base_path):
     metricName="accuracy"
   )
   accuracy = evaluator.evaluate(predictions)
+  mlflow.log_metric("accuracy", accuracy)
+  mlflow.log_param("maxBins", 4657)
+  mlflow.log_param("model_path", "s3a://flight-data/models/")
   print("Accuracy = {}".format(accuracy))
   
   # Check the distribution of predictions
