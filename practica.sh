@@ -109,9 +109,12 @@ arrancar_docker() {
   done
   ok "Cassandra lista"
 
-  info "Reiniciando Flask y Spark..."
-  docker compose stop flask spark-predictor
-  docker compose start flask spark-predictor
+  info "Pausando Spark predictor hasta que MinIO tenga los modelos..."
+  docker compose stop spark-predictor
+
+  info "Reiniciando Flask..."
+  docker compose stop flask
+  docker compose start flask
 
   info "Esperando inicializacion final (20s)..."
   sleep 20
@@ -130,6 +133,9 @@ arrancar_docker() {
   sleep 5
   docker cp ~/practica_creativa/models/. minio:/tmp/models/ 2>/dev/null
   docker exec minio sh -c "mc cp --recursive /tmp/models/ local/flight-data/models/ 2>/dev/null" && ok "Modelos subidos" || warn "Error subiendo modelos"
+
+  info "Arrancando Spark predictor en modo cluster..."
+  docker compose start spark-predictor
 
   info "Configurando Grafana datasource..."
   sleep 5
@@ -486,6 +492,9 @@ diag_minio() {
 
 diag_spark() {
   header "DIAGNOSTICO -- SPARK STREAMING"
+
+  subheader "Master efectivo del Spark Predictor"
+  docker logs spark-predictor 2>&1 | grep "Spark master:" | tail -3
 
   subheader "Estado del Spark Predictor (4 sinks)"
   docker logs spark-predictor 2>&1 | grep -E "sink=|Sink|Stream started|MicroBatch|Started" | tail -10
@@ -846,5 +855,3 @@ while true; do
     *) warn "Opcion no valida" ;;
   esac
 done
-
-

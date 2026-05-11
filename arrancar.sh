@@ -8,9 +8,11 @@ docker compose up -d
 echo "Esperando inicialización (10s)..."
 sleep 10
 
-echo "Reiniciando Flask y Spark (Cassandra tarda en arrancar)..."
-docker compose stop flask spark-predictor
-docker compose start flask spark-predictor
+echo "Reiniciando Flask; Spark predictor arrancara cuando MinIO tenga modelos..."
+echo "Pausando predictor hasta que MinIO tenga los modelos..."
+docker compose stop spark-predictor
+docker compose stop flask
+docker compose start flask
 
 echo "Esperando inicialización final (15s)..."
 sleep 15
@@ -24,6 +26,15 @@ docker exec airflow airflow users create \
 echo "Configurando MinIO..."
 docker exec minio sh -c \
   "mc alias set local http://localhost:9000 minioadmin minioadmin && mc mb local/flight-data 2>/dev/null || true" 2>/dev/null
+
+echo "Subiendo modelos a MinIO..."
+docker cp ~/practica_creativa/models/. minio:/tmp/models/ 2>/dev/null
+docker exec minio sh -c "mc cp --recursive /tmp/models/ local/flight-data/models/ 2>/dev/null" \
+  && echo "Modelos subidos a s3a://flight-data/models" \
+  || echo "No se pudieron subir los modelos; revisa ~/practica_creativa/models"
+
+echo "Arrancando Spark predictor en modo cluster..."
+docker compose start spark-predictor
 
 echo "Configurando Grafana datasource..."
 sleep 5

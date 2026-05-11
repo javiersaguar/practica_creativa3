@@ -17,21 +17,55 @@ spec:
         image: europe-southwest1-docker.pkg.dev/project-6577bf93-e3eb-42be-8f6/practica/spark-predictor:latest
         imagePullPolicy: Always
         command: ["/opt/spark/bin/spark-submit"]
+        ports:
+        - containerPort: 4040
+        - containerPort: 7078
+        - containerPort: 7079
         args:
         - "--master"
         - "spark://spark-master:7077"
         - "--class"
         - "es.upm.dit.ging.predictor.MakePrediction"
         - "--packages"
-        - "org.apache.spark:spark-sql-kafka-0-10_2.13:4.1.1,org.mongodb.spark:mongo-spark-connector_2.13:10.4.1,com.datastax.spark:spark-cassandra-connector_2.13:3.5.1"
+        - "org.apache.spark:spark-sql-kafka-0-10_2.13:4.1.1,org.mongodb.spark:mongo-spark-connector_2.13:10.4.1,com.datastax.spark:spark-cassandra-connector_2.13:3.5.1,org.apache.hadoop:hadoop-aws:3.4.2,com.amazonaws:aws-java-sdk-bundle:1.12.367"
+        - "--conf"
+        - "spark.driver.host=spark-predictor"
+        - "--conf"
+        - "spark.driver.bindAddress=0.0.0.0"
+        - "--conf"
+        - "spark.driver.port=7078"
+        - "--conf"
+        - "spark.blockManager.port=7079"
         - "--conf"
         - "spark.cassandra.connection.host=cassandra"
         - "--conf"
         - "spark.jars.ivy=/tmp/.ivy2"
+        - "--conf"
+        - "spark.hadoop.fs.s3a.endpoint=http://minio:9000"
+        - "--conf"
+        - "spark.hadoop.fs.s3a.access.key=minioadmin"
+        - "--conf"
+        - "spark.hadoop.fs.s3a.secret.key=minioadmin"
+        - "--conf"
+        - "spark.hadoop.fs.s3a.path.style.access=true"
+        - "--conf"
+        - "spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem"
+        - "--conf"
+        - "spark.hadoop.fs.s3a.connection.ssl.enabled=false"
+        - "--conf"
+        - "spark.hadoop.fs.s3a.aws.credentials.provider=org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider"
         - "/app/jars/flight_prediction_2.13-0.1.jar"
         env:
         - name: PROJECT_HOME
           value: "/app"
+        - name: MODEL_BASE_PATH
+          value: "s3a://flight-data/models"
+        - name: S3_ENDPOINT
+          value: "http://minio:9000"
+        - name: AWS_ACCESS_KEY_ID
+          value: "minioadmin"
+        - name: AWS_SECRET_ACCESS_KEY
+          value: "minioadmin"
         - name: KAFKA_BOOTSTRAP_SERVERS
           value: "kafka:9092"
         - name: MONGO_URI
@@ -42,3 +76,21 @@ spec:
           value: "spark"
         - name: IVY_HOME
           value: "/tmp/.ivy2"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: spark-predictor
+spec:
+  selector:
+    app: spark-predictor
+  ports:
+  - name: driver-ui
+    port: 4040
+    targetPort: 4040
+  - name: driver
+    port: 7078
+    targetPort: 7078
+  - name: block-manager
+    port: 7079
+    targetPort: 7079

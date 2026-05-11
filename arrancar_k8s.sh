@@ -64,8 +64,17 @@ MINIO_POD=$(kubectl get pod -l app=minio -o jsonpath='{.items[0].metadata.name}'
 if [ -n "$MINIO_POD" ]; then
   kubectl exec $MINIO_POD -- sh -c \
     "mc alias set local http://localhost:9000 minioadmin minioadmin && mc mb local/flight-data 2>/dev/null || true" 2>/dev/null || true
+  echo "Subiendo modelos a MinIO..."
+  MODEL_DIR="$HOME/practica_creativa/models"
+  find "$MODEL_DIR" -type f | while read f; do
+    REL="${f#$MODEL_DIR/}"
+    cat "$f" | kubectl exec -i $MINIO_POD -- mc pipe "local/flight-data/models/$REL" 2>/dev/null
+  done
   echo "MinIO configurado."
 fi
+
+echo "Reiniciando Spark predictor para usar modelos en MinIO..."
+kubectl rollout restart deployment/spark-predictor 2>/dev/null || true
 
 echo ""
 echo "============================================"
