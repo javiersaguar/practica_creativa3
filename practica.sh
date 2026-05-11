@@ -206,7 +206,7 @@ spec:
   resources:
     requests:
       storage: 5Gi
-IOEF
+IEOF
   ok "PVC ivy-cache listo"
 
   info "Aplicando manifests..."
