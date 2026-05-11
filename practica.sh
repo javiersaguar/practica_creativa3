@@ -194,6 +194,21 @@ arrancar_k8s() {
     --dry-run=client -o yaml | kubectl apply -f - 2>/dev/null \
     && ok "ConfigMap airflow-dags creado" || warn "Error creando ConfigMap"
 
+  info "Creando PVC ivy-cache para JARs de Spark..."
+  kubectl apply -f - << 'IEOF'
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ivy-cache-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+IOEF
+  ok "PVC ivy-cache listo"
+
   info "Aplicando manifests..."
   kubectl apply -f $MANIFESTS/mongo.yaml
   kubectl apply -f $MANIFESTS/cassandra.yaml
