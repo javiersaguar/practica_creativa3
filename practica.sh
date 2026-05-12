@@ -97,6 +97,21 @@ arrancar_docker() {
   header "ARRANCANDO STACK DOCKER COMPOSE"
   cd $PROJECT_HOME
 
+  info "Compilando JAR Scala si no existe o es antiguo..."
+  if [ ! -f "$PROJECT_HOME/shared-jars/flight_prediction_2.13-0.1.jar" ] ||      [ "$PROJECT_HOME/flight_prediction/src/main/scala/es/upm/dit/ging/predictor/MakePrediction.scala" -nt "$PROJECT_HOME/shared-jars/flight_prediction_2.13-0.1.jar" ] ||      [ "$PROJECT_HOME/flight_prediction/src/main/scala/es/upm/dit/ging/predictor/TrainModel.scala" -nt "$PROJECT_HOME/shared-jars/flight_prediction_2.13-0.1.jar" ]; then
+    info "Recompilando JAR con sbt..."
+    docker run --rm       -v "$PROJECT_HOME/flight_prediction":/app       -w /app       sbtscala/scala-sbt:eclipse-temurin-17.0.15_6_1.12.10_2.13.18       sbt assembly
+    mkdir -p "$PROJECT_HOME/shared-jars"
+    cp "$PROJECT_HOME/flight_prediction/target/scala-2.13/flight_prediction_2.13-0.1.jar"        "$PROJECT_HOME/shared-jars/flight_prediction_2.13-0.1.jar"
+    cp "$PROJECT_HOME/flight_prediction/target/scala-2.13/flight_prediction_2.13-0.1.jar"        "$PROJECT_HOME/docker/spark/flight_prediction_2.13-0.1.jar"
+    ok "JAR compilado"
+    info "Reconstruyendo imagenes Spark con nuevo JAR..."
+    docker compose build spark-master spark-worker-1 spark-worker-2 spark-predictor
+    ok "Imagenes reconstruidas"
+  else
+    ok "JAR ya existe y esta actualizado"
+  fi
+
   info "Levantando contenedores..."
   docker compose up -d
 
