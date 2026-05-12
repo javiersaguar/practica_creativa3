@@ -129,28 +129,77 @@ arrancar_docker() {
   docker exec minio sh -c \
     "mc alias set local http://localhost:9000 minioadmin minioadmin && mc mb local/flight-data 2>/dev/null || true" 2>/dev/null
 
-  info "Subiendo modelos a MinIO..."
-  sleep 5
-  docker cp "$PROJECT_HOME/models/." minio:/tmp/models/ 2>/dev/null
-  docker exec minio sh -c "mc cp --recursive /tmp/models/ local/flight-data/models/ 2>/dev/null" && ok "Modelos subidos" || warn "Error subiendo modelos"
+  info "Asegurando JAR en shared-jars..."
+  mkdir -p "$PROJECT_HOME/shared-jars"
+  cp "$PROJECT_HOME/flight_prediction/target/scala-2.13/flight_prediction_2.13-0.1.jar"      "$PROJECT_HOME/shared-jars/flight_prediction_2.13-0.1.jar" 2>/dev/null     && ok "JAR copiado a shared-jars" || warn "JAR no encontrado en target"
+
+  info "Creando keyspace y tablas en Cassandra..."
+  docker exec cassandra cqlsh -e "
+CREATE KEYSPACE IF NOT EXISTS agile_data_science
+WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1};
+CREATE TABLE IF NOT EXISTS agile_data_science.origin_dest_distances (
+  origin TEXT, dest TEXT, distance DOUBLE, PRIMARY KEY (origin, dest));
+CREATE TABLE IF NOT EXISTS agile_data_science.flight_delay_classification_response (
+  origin TEXT, dest TEXT, flight_date TEXT, dep_delay DOUBLE,
+  carrier TEXT, uuid TEXT, prediction DOUBLE, timestamp TIMESTAMP,
+  PRIMARY KEY (uuid));" 2>/dev/null && ok "Keyspace creado" || warn "Error Cassandra"
+
+  info "Importando distancias en Cassandra..."
+  python3 -c "
+import json
+lines_cql = []
+with open('$PROJECT_HOME/data/origin_dest_distances.jsonl') as f:
+    for line in f:
+        r = json.loads(line)
+        lines_cql.append(\"INSERT INTO agile_data_science.origin_dest_distances (origin, dest, distance) VALUES ('{}', '{}', {});\".format(r['Origin'], r['Dest'], float(r['Distance'])))
+with open('/tmp/distances.cql', 'w') as f:
+    f.write(chr(10).join(lines_cql))
+" 2>/dev/null
+  docker cp /tmp/distances.cql cassandra:/tmp/distances.cql 2>/dev/null
+  docker exec cassandra cqlsh -f /tmp/distances.cql 2>/dev/null && ok "Distancias importadas" || warn "Error importando distancias"
+
+  info "Reiniciando workers para montar shared-jars..."
+  docker compose restart spark-master spark-worker-1 spark-worker-2
+  sleep 15
+
+  info "Subiendo datos de entrenamiento a MinIO..."
+  docker cp "$PROJECT_HOME/data/simple_flight_delay_features.jsonl.bz2" minio:/tmp/ 2>/dev/null
+  docker exec minio sh -c "mc alias set local http://localhost:9000 minioadmin minioadmin && mc cp /tmp/simple_flight_delay_features.jsonl.bz2 local/flight-data/data/simple_flight_delay_features.jsonl.bz2 2>/dev/null"     && ok "Datos subidos a MinIO" || warn "Error subiendo datos"
+
+  info "Creando tabla Iceberg (2-3 min)..."
+  cat > /tmp/load_iceberg.py << 'PY'
+from pyspark.sql import SparkSession
+spark = SparkSession.builder.appName("load-iceberg") \
+  .config("spark.sql.extensions","org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions") \
+  .config("spark.sql.catalog.minio","org.apache.iceberg.spark.SparkCatalog") \
+  .config("spark.sql.catalog.minio.type","hadoop") \
+  .config("spark.sql.catalog.minio.warehouse","s3a://flight-data/warehouse") \
+  .config("spark.hadoop.fs.s3a.endpoint","http://minio:9000") \
+  .config("spark.hadoop.fs.s3a.access.key","minioadmin") \
+  .config("spark.hadoop.fs.s3a.secret.key","minioadmin") \
+  .config("spark.hadoop.fs.s3a.path.style.access","true") \
+  .config("spark.hadoop.fs.s3a.impl","org.apache.hadoop.fs.s3a.S3AFileSystem") \
+  .config("spark.hadoop.fs.s3a.connection.ssl.enabled","false") \
+  .getOrCreate()
+df = spark.read.json("s3a://flight-data/data/simple_flight_delay_features.jsonl.bz2")
+spark.sql("CREATE NAMESPACE IF NOT EXISTS minio.flights")
+spark.sql("DROP TABLE IF EXISTS minio.flights.training_data")
+df.writeTo("minio.flights.training_data").create()
+print("Registros Iceberg:", spark.table("minio.flights.training_data").count())
+spark.stop()
+PY
+  docker cp /tmp/load_iceberg.py spark-master:/tmp/load_iceberg.py
+  docker exec spark-master bash -lc "/opt/spark/bin/spark-submit --master spark://spark-master:7077 --packages org.apache.iceberg:iceberg-spark-runtime-4.0_2.13:1.10.1,org.apache.hadoop:hadoop-aws:3.4.2,com.amazonaws:aws-java-sdk-bundle:1.12.367 --conf spark.jars.ivy=/home/spark/.ivy2 /tmp/load_iceberg.py" 2>&1 | grep -E "Registros|ERROR" | tail -3 && ok "Tabla Iceberg creada" || warn "Error Iceberg"
+
+  info "Entrenando modelo TrainModel en deploy-mode cluster (3-4 min)..."
+  docker exec spark-master bash -lc "/opt/spark/bin/spark-submit --master spark://spark-master:7077 --deploy-mode cluster --class es.upm.dit.ging.predictor.TrainModel --conf spark.standalone.submit.waitAppCompletion=true --conf spark.driver.memory=1g --conf spark.executor.memory=1g --conf spark.executor.cores=1 --conf spark.jars.ivy=/home/spark/.ivy2 --conf spark.driverEnv.MLFLOW_TRACKING_URI=http://mlflow:5000 --conf spark.driverEnv.MODEL_BASE_PATH=s3a://flight-data/models --conf spark.driverEnv.TRAINING_TABLE=minio.flights.training_data --conf spark.driverEnv.S3_ENDPOINT=http://minio:9000 --conf spark.driverEnv.AWS_ACCESS_KEY_ID=minioadmin --conf spark.driverEnv.AWS_SECRET_ACCESS_KEY=minioadmin --conf spark.hadoop.fs.s3a.endpoint=http://minio:9000 --conf spark.hadoop.fs.s3a.access.key=minioadmin --conf spark.hadoop.fs.s3a.secret.key=minioadmin --conf spark.hadoop.fs.s3a.path.style.access=true --conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem --conf spark.hadoop.fs.s3a.connection.ssl.enabled=false --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions --conf spark.sql.catalog.minio=org.apache.iceberg.spark.SparkCatalog --conf spark.sql.catalog.minio.type=hadoop --conf spark.sql.catalog.minio.warehouse=s3a://flight-data/warehouse file:///shared-jars/flight_prediction_2.13-0.1.jar" 2>&1 | grep -E "Training completed|Accuracy|ERROR" | tail -3 && ok "Modelo entrenado" || warn "Error entrenamiento"
 
   info "Arrancando Spark predictor en modo cluster..."
   docker compose --profile predictor up -d spark-predictor
   ok "Predictor enviado al cluster"
 
-  info "Configurando Grafana datasource..."
-  sleep 5
-  curl -s -X POST http://localhost:3000/api/datasources \
-    -H "Content-Type: application/json" \
-    -u admin:admin \
-    -d '{"name":"Prometheus","type":"prometheus","url":"http://prometheus:9090","access":"proxy","isDefault":true}' \
-    > /dev/null 2>&1 || true
-
-  info "Entrenamiento Scala en cluster mode: no hace falta copiar scripts PySpark a spark-master"
-
-  info "Disparando DAG de reentrenamiento inicial en Airflow..."
-  sleep 10
-  docker exec airflow airflow dags trigger retrain_flight_delay_model 2>/dev/null && ok "DAG disparado" || warn "DAG no disparado"
+  info "Disparando DAG Airflow para reentrenamientos futuros..."
+  docker exec airflow airflow dags unpause retrain_flight_delay_model 2>/dev/null || true
 
   ok "Stack Docker listo"
   show_urls_docker
