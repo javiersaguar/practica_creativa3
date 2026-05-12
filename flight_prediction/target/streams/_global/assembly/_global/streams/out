@@ -1,24 +1,24 @@
 [debug] Separate classpath projects and all dependencies start:
 [debug] Separate classpath projects and all dependencies end. Took 2 ms
 [debug] Collect only external dependencies start:
-[debug] Collect only external dependencies end. Took 0 ms
+[debug] Collect only external dependencies end. Took 1 ms
 [debug] Collect excluded jar names start:
 [debug] Collect excluded jar names end. Took 0 ms
 [debug] Filter jars start:
 [debug] Filter jars end. Took 1 ms
 [debug] Collect and shade project classes start:
-[debug] Collect and shade project classes end. Took 2 ms
+[debug] Collect and shade project classes end. Took 4 ms
 [debug] Collect and shade dependency entries start:
-[debug] Collect and shade dependency entries end. Took 22 ms
+[debug] Collect and shade dependency entries end. Took 32 ms
 [debug] Collect renames start:
-[debug] Collect renames end. Took 44 ms
+[debug] Collect renames end. Took 61 ms
 [debug] Process renames start:
-[debug] Process renames end. Took 35 ms
+[debug] Process renames end. Took 38 ms
 [debug] Collect all merge strategies for cache check start:
-[debug] Collect all merge strategies for cache check end. Took 49 ms
+[debug] Collect all merge strategies for cache check end. Took 81 ms
 [debug] Building assembly jar due to missing output...
 [debug] Merge all conflicting jar entries (including those renamed) start:
-[debug] Merge all conflicting jar entries (including those renamed) end. Took 60 ms
+[debug] Merge all conflicting jar entries (including those renamed) end. Took 94 ms
 [debug] Report merge results start:
 [info] 1 file(s) merged using strategy 'Discard' (Run the task at debug level to see the details)
 [debug] 
@@ -27,16 +27,16 @@
 [debug]   None
 [debug] Merge origins:
 [debug]   Jar name = scala-library-2.13.16.jar, jar org = org.scala-lang, entry target = META-INF/MANIFEST.MF
-[debug] Report merge results end. Took 7 ms
+[debug] Report merge results end. Took 9 ms
 [debug] Finding remaining conflicts that were not merged start:
-[debug] Finding remaining conflicts that were not merged end. Took 79 ms
+[debug] Finding remaining conflicts that were not merged end. Took 98 ms
 [debug] Sort/Parallelize merged entries start:
-[debug] Sort/Parallelize merged entries end. Took 10 ms
+[debug] Sort/Parallelize merged entries end. Took 12 ms
 [debug] Create jar start:
-[debug] Create jar end. Took 1118 ms
+[debug] Create jar end. Took 1310 ms
 [debug] Hash newly-built Jar start:
-[debug] Hash newly-built Jar end. Took 39 ms
+[debug] Hash newly-built Jar end. Took 31 ms
 [info] Built: /app/target/scala-2.13/flight_prediction_2.13-0.1.jar
-[info] Jar hash: 877c60efcf6d764551841bcdb984e582ff9ba831
+[info] Jar hash: 422dfdf74a66446768784687433962f007349260
 [debug] Close library jar references start:
-[debug] Close library jar references end. Took 1 ms
+[debug] Close library jar references end. Took 2 ms

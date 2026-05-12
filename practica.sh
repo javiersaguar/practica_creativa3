@@ -6,9 +6,10 @@
 
 ZONE="europe-southwest1-a"
 CLUSTER="practica-k8s"
-MANIFESTS=~/practica_creativa/k8s-gke
-PROJECT_HOME=~/practica_creativa
+PROJECT_HOME="${PROJECT_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+MANIFESTS="${MANIFESTS:-$PROJECT_HOME/k8s-gke}"
 SPARK_HOME=~/spark-4.1.1
+export PROJECT_HOME
 
 # PATH para spark-submit
 export PATH=$SPARK_HOME/bin:$PATH
@@ -109,8 +110,7 @@ arrancar_docker() {
   done
   ok "Cassandra lista"
 
-  info "Pausando Spark predictor hasta que MinIO tenga los modelos..."
-  docker compose stop spark-predictor
+  info "Spark predictor se creara cuando MinIO tenga los modelos..."
 
   info "Reiniciando Flask..."
   docker compose stop flask
@@ -131,18 +131,12 @@ arrancar_docker() {
 
   info "Subiendo modelos a MinIO..."
   sleep 5
-  docker cp ~/practica_creativa/models/. minio:/tmp/models/ 2>/dev/null
+  docker cp "$PROJECT_HOME/models/." minio:/tmp/models/ 2>/dev/null
   docker exec minio sh -c "mc cp --recursive /tmp/models/ local/flight-data/models/ 2>/dev/null" && ok "Modelos subidos" || warn "Error subiendo modelos"
 
-  info "Limpiando checkpoints de Spark Streaming..."
-  docker compose run --rm --entrypoint bash spark-predictor -c "rm -rf /tmp/checkpoint_*" 2>/dev/null || true
-  ok "Checkpoints limpiados"
   info "Arrancando Spark predictor en modo cluster..."
-  docker compose start spark-predictor
-  sleep 60
-  info "Reiniciando predictor para asegurar carga de modelos..."
-  docker compose restart spark-predictor
-  ok "Predictor reiniciado"
+  docker compose --profile predictor up -d spark-predictor
+  ok "Predictor enviado al cluster"
 
   info "Configurando Grafana datasource..."
   sleep 5
@@ -152,15 +146,7 @@ arrancar_docker() {
     -d '{"name":"Prometheus","type":"prometheus","url":"http://prometheus:9090","access":"proxy","isDefault":true}' \
     > /dev/null 2>&1 || true
 
-  info "Copiando scripts de entrenamiento a spark-master..."
-  docker cp ~/practica_creativa/resources/train_spark_mllib_model_iceberg.py spark-master:/tmp/ 2>/dev/null
-  docker cp ~/practica_creativa/resources/train_spark_mllib_model_mlflow.py spark-master:/tmp/ 2>/dev/null
-  ok "Scripts copiados"
-
-  info "Instalando mlflow en workers (necesario para reentrenamiento)..."
-  docker exec spark-worker-1 pip install mlflow 2>/dev/null | grep -E "Successfully|already" || true
-  docker exec spark-worker-2 pip install mlflow 2>/dev/null | grep -E "Successfully|already" || true
-  ok "MLflow en workers listo"
+  info "Entrenamiento Scala en cluster mode: no hace falta copiar scripts PySpark a spark-master"
 
   info "Disparando DAG de reentrenamiento inicial en Airflow..."
   sleep 10
@@ -225,8 +211,8 @@ arrancar_k8s() {
       "mc alias set local http://localhost:9000 minioadmin minioadmin && mc mb local/flight-data 2>/dev/null || true" 2>/dev/null || true
     kubectl exec $MINIO_POD -- mc alias set local http://localhost:9000 minioadmin minioadmin 2>/dev/null
     kubectl exec $MINIO_POD -- mc mb local/flight-data 2>/dev/null || true
-    find ~/practica_creativa/models -type f | while read f; do
-      REL="${f#/home/javisaguarantona/practica_creativa/models/}"
+    find "$PROJECT_HOME/models" -type f | while read f; do
+      REL="${f#$PROJECT_HOME/models/}"
       cat "$f" | kubectl exec -i $MINIO_POD -- mc pipe "local/flight-data/models/$REL" 2>/dev/null
     done
     ok "MinIO configurado y modelos subidos"
@@ -249,9 +235,9 @@ CREATE TABLE IF NOT EXISTS agile_data_science.flight_delay_classification_respon
 
   info "Importando distancias en Cassandra..."
   python3 << 'PYEOF'
-import json
+import json, os
 lines = []
-with open('/home/javisaguarantona/practica_creativa/data/origin_dest_distances.jsonl') as f:
+with open(os.environ.get('PROJECT_HOME', '.') + '/data/origin_dest_distances.jsonl') as f:
     for line in f:
         r = json.loads(line)
         origin = r['Origin']
@@ -283,7 +269,6 @@ PYEOF
       warn "Modelos incompatibles detectados - lanzando reentrenamiento automatico..."
       SPARK_POD=$(kubectl get pod -l app=spark-master --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
       AIRFLOW_POD=$(kubectl get pod -l app=airflow --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-      kubectl cp $PROJECT_HOME/resources/train_spark_mllib_model_iceberg.py $SPARK_POD:/tmp/train_spark_mllib_model_iceberg.py 2>/dev/null
       kubectl exec $AIRFLOW_POD -- bash -c "nohup airflow scheduler >> /tmp/scheduler.log 2>&1 &" 2>/dev/null
       sleep 5
       kubectl exec $AIRFLOW_POD -- airflow dags trigger retrain_flight_delay_model 2>/dev/null
@@ -319,13 +304,9 @@ PYEOF
   fi
 
   if [ -n "$SPARK_POD" ]; then
-    info "Copiando script de entrenamiento con MLflow a spark-master..."
-    kubectl cp $PROJECT_HOME/resources/train_spark_mllib_model_iceberg.py $SPARK_POD:/tmp/train_spark_mllib_model_iceberg.py 2>/dev/null
-    info "Verificando MLflow en spark-master..."
-    kubectl exec $SPARK_POD -- python3 -c "import mlflow" 2>/dev/null \
-      && ok "MLflow ya disponible" \
-      || (info "Instalando MLflow..." && kubectl exec $SPARK_POD -- pip install mlflow 2>/dev/null | tail -1)
-    ok "spark-master preparado"
+    kubectl exec $SPARK_POD -- test -f /app/jars/flight_prediction_2.13-0.1.jar 2>/dev/null \
+      && ok "spark-master preparado con JAR Scala" \
+      || warn "No se encuentra el JAR en /app/jars dentro de spark-master"
   fi
 
   echo ""
@@ -383,9 +364,8 @@ reentrenar_k8s() {
   kubectl exec $AIRFLOW_POD -- chmod +x /tmp/kubectl 2>/dev/null || true
 
   if [ -n "$SPARK_POD" ]; then
-    kubectl cp $PROJECT_HOME/resources/train_spark_mllib_model_iceberg.py $SPARK_POD:/tmp/train_spark_mllib_model_iceberg.py 2>/dev/null || true
-    kubectl exec $SPARK_POD -- python3 -c "import mlflow" 2>/dev/null \
-      || kubectl exec $SPARK_POD -- pip install mlflow 2>/dev/null | tail -1
+    kubectl exec $SPARK_POD -- test -f /app/jars/flight_prediction_2.13-0.1.jar 2>/dev/null \
+      || warn "No se encuentra el JAR en /app/jars dentro de spark-master"
   fi
 
   info "Asegurando scheduler activo..."
