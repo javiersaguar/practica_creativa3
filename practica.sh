@@ -139,7 +139,7 @@ arrancar_docker() {
   ok "Checkpoints limpiados"
   info "Arrancando Spark predictor en modo cluster..."
   docker compose start spark-predictor
-  sleep 30
+  sleep 60
   info "Reiniciando predictor para asegurar carga de modelos..."
   docker compose restart spark-predictor
   ok "Predictor reiniciado"
