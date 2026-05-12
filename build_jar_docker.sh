@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_HOME="${PROJECT_HOME:-$HOME/practica_creativa}"
+PROJECT_HOME="${PROJECT_HOME:-$HOME/practica_creativa_deploy_mode}"
 SBT_LAUNCHER="$PROJECT_HOME/.tools/sbt"
 
 if ! command -v java >/dev/null 2>&1; then

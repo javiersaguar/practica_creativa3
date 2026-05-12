@@ -1,4 +1,5 @@
 import sys, os, re
+import time
 from flask import Flask, render_template, request
 from pymongo import MongoClient
 from cassandra.cluster import Cluster
@@ -27,8 +28,56 @@ flight_requests_total = Counter(
 )
 
 client = MongoClient(os.environ.get("MONGO_URI", "mongodb://localhost:27017"))
-cassandra_cluster = Cluster([os.environ.get("CASSANDRA_HOST", "localhost")])
-cassandra_session = cassandra_cluster.connect("agile_data_science")
+
+def connect_cassandra_with_retry():
+    hosts = [os.environ.get("CASSANDRA_HOST", "localhost")]
+    last_error = None
+    for attempt in range(1, 61):
+        try:
+            cluster = Cluster(hosts)
+            session = cluster.connect()
+            session.execute("""
+                CREATE KEYSPACE IF NOT EXISTS agile_data_science
+                WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1}
+            """)
+            session.set_keyspace("agile_data_science")
+            session.execute("""
+                CREATE TABLE IF NOT EXISTS origin_dest_distances (
+                    origin text,
+                    dest text,
+                    distance double,
+                    PRIMARY KEY (origin, dest)
+                )
+            """)
+            session.execute("""
+                CREATE TABLE IF NOT EXISTS flight_delay_classification_response (
+                    uuid text PRIMARY KEY,
+                    origin text,
+                    dayofweek int,
+                    dayofyear int,
+                    dayofmonth int,
+                    dest text,
+                    depdelay double,
+                    timestamp timestamp,
+                    flightdate date,
+                    carrier text,
+                    distance double,
+                    route text,
+                    prediction double
+                )
+            """)
+            print("Cassandra ready: agile_data_science keyspace and tables available", flush=True)
+            return cluster, session
+        except Exception as exc:
+            last_error = exc
+            print(
+                "Cassandra not ready yet (attempt {}/60): {}".format(attempt, exc),
+                flush=True,
+            )
+            time.sleep(2)
+    raise last_error
+
+cassandra_cluster, cassandra_session = connect_cassandra_with_retry()
 
 from pyelasticsearch import ElasticSearch
 elastic = ElasticSearch(config.ELASTIC_URL)
@@ -57,21 +106,27 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 prediction_store = {}
 
 def kafka_consumer_thread():
-    consumer = KafkaConsumer(
-        RESPONSE_TOPIC,
-        bootstrap_servers=[os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")],
-        value_deserializer=lambda m: json.loads(m.decode('utf-8')),
-        auto_offset_reset='earliest',
-        group_id='flask-ws-1777393487'
-    )
-    for message in consumer:
-        prediction = message.value
-        uuid = prediction.get('UUID')
-        if uuid:
-            prediction_store[uuid] = prediction
-            category = str(prediction.get('Prediction', 'unknown'))
-            flight_predictions_total.labels(category=category).inc()
-            socketio.emit('prediction_response', prediction)
+    while True:
+        try:
+            consumer = KafkaConsumer(
+                RESPONSE_TOPIC,
+                bootstrap_servers=[os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")],
+                value_deserializer=lambda m: json.loads(m.decode('utf-8')),
+                auto_offset_reset='earliest',
+                group_id='flask-ws-1777393487'
+            )
+            print("Kafka response consumer connected", flush=True)
+            for message in consumer:
+                prediction = message.value
+                uuid = prediction.get('UUID')
+                if uuid:
+                    prediction_store[uuid] = prediction
+                    category = str(prediction.get('Prediction', 'unknown'))
+                    flight_predictions_total.labels(category=category).inc()
+                    socketio.emit('prediction_response', prediction)
+        except Exception as exc:
+            print("Kafka response consumer not ready: {}".format(exc), flush=True)
+            time.sleep(5)
 
 t = threading.Thread(target=kafka_consumer_thread, daemon=True)
 t.start()
@@ -373,7 +428,14 @@ def regress_flight_delays():
   prediction_features['FlightNum'] = api_form_values['FlightNum']
   
   # Set the derived values
-  prediction_features['Distance'] = predict_utils.get_flight_distance(cassandra_session, api_form_values['Origin'], api_form_values['Dest'])
+  try:
+    prediction_features['Distance'] = predict_utils.get_flight_distance(
+      cassandra_session,
+      api_form_values['Origin'],
+      api_form_values['Dest']
+    )
+  except ValueError as exc:
+    return json_util.dumps({"status": "ERROR", "message": str(exc)}), 400
   
   # Turn the date into DayOfYear, DayOfMonth, DayOfWeek
   date_features_dict = predict_utils.get_regression_date_args(api_form_values['FlightDate'])
@@ -429,10 +491,13 @@ def classify_flight_delays():
     prediction_features[key] = value
   
   # Set the derived values
-  prediction_features['Distance'] = predict_utils.get_flight_distance(
-    cassandra_session, api_form_values['Origin'],
-    api_form_values['Dest']
-  )
+  try:
+    prediction_features['Distance'] = predict_utils.get_flight_distance(
+      cassandra_session, api_form_values['Origin'],
+      api_form_values['Dest']
+    )
+  except ValueError as exc:
+    return json_util.dumps({"status": "ERROR", "message": str(exc)}), 400
   
   # Turn the date into DayOfYear, DayOfMonth, DayOfWeek
   date_features_dict = predict_utils.get_regression_date_args(
@@ -518,10 +583,13 @@ def classify_flight_delays_realtime():
     prediction_features[key] = value
   
   # Set the derived values
-  prediction_features['Distance'] = predict_utils.get_flight_distance(
-    cassandra_session, api_form_values['Origin'],
-    api_form_values['Dest']
-  )
+  try:
+    prediction_features['Distance'] = predict_utils.get_flight_distance(
+      cassandra_session, api_form_values['Origin'],
+      api_form_values['Dest']
+    )
+  except ValueError as exc:
+    return json_util.dumps({"status": "ERROR", "message": str(exc)}), 400
   
   # Turn the date into DayOfYear, DayOfMonth, DayOfWeek
   date_features_dict = predict_utils.get_regression_date_args(

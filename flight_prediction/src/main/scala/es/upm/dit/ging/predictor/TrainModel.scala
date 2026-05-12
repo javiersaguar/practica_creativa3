@@ -1,207 +1,212 @@
 package es.upm.dit.ging.predictor
 
-import org.apache.spark.ml.Pipeline
+import java.net.{HttpURLConnection, URL, URLEncoder}
+import java.nio.charset.StandardCharsets
+
 import org.apache.spark.ml.classification.RandomForestClassifier
+import org.apache.spark.ml.evaluation.MulticlassClassificationEvaluator
 import org.apache.spark.ml.feature.{Bucketizer, StringIndexer, VectorAssembler}
 import org.apache.spark.sql.SparkSession
-import org.apache.spark.sql.functions._
+import org.apache.spark.sql.functions.{concat, lit}
+
+import scala.io.Source
+import scala.util.Try
 
 object TrainModel {
 
-  class MlflowRestClient(trackingUri: String) {
-    import java.net.{HttpURLConnection, URL}
-    import java.nio.charset.StandardCharsets
+  object MlflowRestClient {
+    private def escapeJson(value: String): String =
+      value.replace("\\", "\\\\").replace("\"", "\\\"")
 
-    private def request(method: String, path: String, body: Option[String] = None): (Int, String) = {
-      val url = new URL(s"$trackingUri$path")
-      val conn = url.openConnection().asInstanceOf[HttpURLConnection]
-      conn.setRequestMethod(method)
-      conn.setRequestProperty("Content-Type", "application/json")
-      conn.setConnectTimeout(5000)
-      conn.setReadTimeout(10000)
-      body.foreach { b =>
-        conn.setDoOutput(true)
-        val os = conn.getOutputStream
-        os.write(b.getBytes(StandardCharsets.UTF_8))
-        os.close()
+    private def request(baseUri: String, method: String, path: String, body: Option[String] = None): String = {
+      val url = new URL(baseUri.stripSuffix("/") + path)
+      val connection = url.openConnection().asInstanceOf[HttpURLConnection]
+      connection.setRequestMethod(method)
+      connection.setConnectTimeout(5000)
+      connection.setReadTimeout(15000)
+      connection.setRequestProperty("Content-Type", "application/json")
+
+      body.foreach { payload =>
+        connection.setDoOutput(true)
+        val bytes = payload.getBytes(StandardCharsets.UTF_8)
+        connection.getOutputStream.write(bytes)
       }
-      val code = conn.getResponseCode
-      val stream = if (code >= 400) conn.getErrorStream else conn.getInputStream
-      val response = if (stream != null) {
-        val s = new java.util.Scanner(stream).useDelimiter("\\A")
-        if (s.hasNext) s.next() else ""
-      } else ""
-      (code, response)
-    }
 
-    def getOrCreateExperiment(name: String): String = {
-      val (code, body) = request("GET", s"/api/2.0/mlflow/experiments/get-by-name?experiment_name=${java.net.URLEncoder.encode(name, "UTF-8")}")
-      if (code == 200) {
-        val id = body.split("\"experiment_id\":\"").lift(1).map(_.split("\"")(0)).getOrElse("")
-        if (id.nonEmpty) return id
+      val code = connection.getResponseCode
+      val stream =
+        if (code >= 200 && code < 300) connection.getInputStream
+        else connection.getErrorStream
+      val response = if (stream == null) "" else Source.fromInputStream(stream).mkString
+
+      if (code < 200 || code >= 300) {
+        throw new RuntimeException(s"MLflow request failed: $method $path code=$code body=$response")
       }
-      val (code2, body2) = request("POST", "/api/2.0/mlflow/experiments/create",
-        Some(s"""{"name":"$name"}"""))
-      if (code2 == 200) {
-        body2.split("\"experiment_id\":\"").lift(1).map(_.split("\"")(0)).getOrElse("0")
-      } else {
-        println(s"MLflow request failed: path=/api/2.0/mlflow/experiments/create code=$code2 body=$body2")
-        "0"
-      }
+      response
     }
 
-    def createRun(experimentId: String): String = {
-      val (code, body) = request("POST", "/api/2.0/mlflow/runs/create",
-        Some(s"""{"experiment_id":"$experimentId","start_time":${System.currentTimeMillis()}}"""))
-      if (code == 200) {
-        body.split("\"run_id\":\"").lift(1).map(_.split("\"")(0)).getOrElse("")
-      } else {
-        println(s"MLflow create run failed: code=$code body=$body")
-        ""
-      }
+    private def firstMatch(pattern: String, text: String): Option[String] =
+      pattern.r.findFirstMatchIn(text).map(_.group(1))
+
+    def getOrCreateExperiment(baseUri: String, name: String): String = {
+      val encodedName = URLEncoder.encode(name, StandardCharsets.UTF_8.toString)
+      val getResponse = Try {
+        request(baseUri, "GET", s"/api/2.0/mlflow/experiments/get-by-name?experiment_name=$encodedName")
+      }.toOption
+
+      getResponse
+        .flatMap(firstMatch("\\\"experiment_id\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"", _))
+        .getOrElse {
+          val body = s"""{"name":"${escapeJson(name)}"}"""
+          val createResponse = request(baseUri, "POST", "/api/2.0/mlflow/experiments/create", Some(body))
+          firstMatch("\\\"experiment_id\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"", createResponse)
+            .getOrElse(throw new RuntimeException(s"Could not parse MLflow experiment id: $createResponse"))
+        }
     }
 
-    def logParam(runId: String, key: String, value: String): Unit = {
-      val (code, body) = request("POST", "/api/2.0/mlflow/runs/log-parameter",
-        Some(s"""{"run_id":"$runId","key":"$key","value":"$value"}"""))
-      if (code != 200) println(s"MLflow log param failed: code=$code body=$body")
+    def createRun(baseUri: String, experimentId: String): String = {
+      val now = System.currentTimeMillis()
+      val body = s"""{"experiment_id":"$experimentId","start_time":$now}"""
+      val response = request(baseUri, "POST", "/api/2.0/mlflow/runs/create", Some(body))
+      firstMatch("\\\"run_id\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"", response)
+        .getOrElse(throw new RuntimeException(s"Could not parse MLflow run id: $response"))
     }
 
-    def logMetric(runId: String, key: String, value: Double): Unit = {
-      val (code, body) = request("POST", "/api/2.0/mlflow/runs/log-metric",
-        Some(s"""{"run_id":"$runId","key":"$key","value":$value,"timestamp":${System.currentTimeMillis()},"step":0}"""))
-      if (code != 200) println(s"MLflow log metric failed: code=$code body=$body")
+    def logParam(baseUri: String, runId: String, key: String, value: String): Unit = {
+      val body =
+        s"""{"run_id":"$runId","key":"${escapeJson(key)}","value":"${escapeJson(value)}"}"""
+      request(baseUri, "POST", "/api/2.0/mlflow/runs/log-parameter", Some(body))
     }
 
-    def finishRun(runId: String, status: String = "FINISHED"): Unit = {
-      val (code, body) = request("POST", "/api/2.0/mlflow/runs/update",
-        Some(s"""{"run_id":"$runId","status":"$status","end_time":${System.currentTimeMillis()}}"""))
-      if (code != 200) println(s"MLflow finish run failed: code=$code body=$body")
+    def logMetric(baseUri: String, runId: String, key: String, value: Double): Unit = {
+      val now = System.currentTimeMillis()
+      val body =
+        s"""{"run_id":"$runId","key":"${escapeJson(key)}","value":$value,"timestamp":$now,"step":0}"""
+      request(baseUri, "POST", "/api/2.0/mlflow/runs/log-metric", Some(body))
+    }
+
+    def finishRun(baseUri: String, runId: String, status: String): Unit = {
+      val now = System.currentTimeMillis()
+      val body = s"""{"run_id":"$runId","status":"$status","end_time":$now}"""
+      request(baseUri, "POST", "/api/2.0/mlflow/runs/update", Some(body))
     }
   }
 
   def main(args: Array[String]): Unit = {
-    val mlflowUri   = sys.env.getOrElse("MLFLOW_TRACKING_URI", "http://mlflow:5000")
-    val modelBase   = sys.env.getOrElse("MODEL_BASE_PATH", "s3a://flight-data/models")
-    val trainingTable = sys.env.getOrElse("TRAINING_TABLE", "minio.flights.training_data")
-
     println("Flight delay training starting...")
 
-    val spark = SparkSession.builder()
-      .appName("es.upm.dit.ging.predictor.TrainModel")
-      .config("spark.sql.extensions", "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions")
-      .config("spark.sql.catalog.minio", "org.apache.iceberg.spark.SparkCatalog")
-      .config("spark.sql.catalog.minio.type", "hadoop")
-      .config("spark.sql.catalog.minio.warehouse", sys.env.getOrElse("MINIO_WAREHOUSE", "s3a://flight-data/warehouse"))
+    val spark = SparkSession
+      .builder()
+      .appName("FlightDelayTrainingCluster")
       .getOrCreate()
 
-    println(s"Spark master: ${spark.sparkContext.master}")
-    println(s"Spark deploy mode: ${spark.sparkContext.deployMode}")
+    import spark.implicits._
 
-    val mlflow = new MlflowRestClient(mlflowUri)
-    val experimentId = mlflow.getOrCreateExperiment("flight_delay_prediction")
-    val runId = mlflow.createRun(experimentId)
+    val hadoopConf = spark.sparkContext.hadoopConfiguration
+    hadoopConf.set("fs.s3a.endpoint", sys.env.getOrElse("S3_ENDPOINT", "http://minio:9000"))
+    hadoopConf.set("fs.s3a.access.key", sys.env.getOrElse("AWS_ACCESS_KEY_ID", "minioadmin"))
+    hadoopConf.set("fs.s3a.secret.key", sys.env.getOrElse("AWS_SECRET_ACCESS_KEY", "minioadmin"))
+    hadoopConf.set("fs.s3a.path.style.access", sys.env.getOrElse("S3_PATH_STYLE_ACCESS", "true"))
+    hadoopConf.set("fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
+    hadoopConf.set("fs.s3a.connection.ssl.enabled", sys.env.getOrElse("S3_SSL_ENABLED", "false"))
+    hadoopConf.set("fs.s3a.aws.credentials.provider", "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider")
+
+    println("Spark master: " + spark.sparkContext.master)
+    println("Spark deploy mode: " + spark.conf.get("spark.submit.deployMode", "client"))
+
+    val trainingTable = sys.env.getOrElse("TRAINING_TABLE", "minio.flights.training_data")
+    val modelBasePath = sys.env.getOrElse("MODEL_BASE_PATH", "s3a://flight-data/models").stripSuffix("/")
+    val mlflowUri = sys.env.getOrElse("MLFLOW_TRACKING_URI", "http://mlflow:5000")
+    val experimentName = sys.env.getOrElse("MLFLOW_EXPERIMENT_NAME", "flight_delay_prediction")
+    val maxBins = sys.env.get("MAX_BINS").flatMap(v => Try(v.toInt).toOption).getOrElse(4657)
+    val maxDepth = sys.env.get("MAX_DEPTH").flatMap(v => Try(v.toInt).toOption).getOrElse(10)
+    val numTrees = sys.env.get("NUM_TREES").flatMap(v => Try(v.toInt).toOption).getOrElse(5)
+
+    var runId: Option[String] = None
 
     try {
-      // Load training data from Iceberg
-      val df = spark.table(trainingTable)
-      val count = df.count()
-      println(s"Total training records: $count")
+      val experimentId = MlflowRestClient.getOrCreateExperiment(mlflowUri, experimentName)
+      runId = Some(MlflowRestClient.createRun(mlflowUri, experimentId))
+      runId.foreach { id =>
+        MlflowRestClient.logParam(mlflowUri, id, "algorithm", "RandomForest")
+        MlflowRestClient.logParam(mlflowUri, id, "data_source", trainingTable)
+        MlflowRestClient.logParam(mlflowUri, id, "deploy_mode", spark.conf.get("spark.submit.deployMode", "client"))
+        MlflowRestClient.logParam(mlflowUri, id, "model_base_path", modelBasePath)
+        MlflowRestClient.logParam(mlflowUri, id, "maxBins", maxBins.toString)
+        MlflowRestClient.logParam(mlflowUri, id, "maxDepth", maxDepth.toString)
+        MlflowRestClient.logParam(mlflowUri, id, "numTrees", numTrees.toString)
+      }
+    } catch {
+      case e: Exception =>
+        println("MLflow tracking disabled for this run: " + e.getMessage)
+    }
 
-      // Check for nulls
-      val nullCols = df.columns.filter(c => df.filter(col(c).isNull).count() > 0).mkString(", ")
-      println(s"Columns with nulls: $nullCols")
+    try {
+      val features = spark.table(trainingTable)
+      val trainingRecords = features.count()
+      println("Training records: " + trainingRecords)
+      runId.foreach(id => MlflowRestClient.logMetric(mlflowUri, id, "training_records", trainingRecords.toDouble))
 
-      val dfClean = df.na.drop()
+      val featuresWithRoute = features.withColumn("Route", concat($"Origin", lit("-"), $"Dest"))
 
-      // Arrival delay bucketizer
-      def modelPath(name: String, base: String): String = s"$base/$name"
-
-      val bucketizer = new Bucketizer()
+      val arrivalBucketizer = new Bucketizer()
+        .setSplits(Array(Double.NegativeInfinity, -15.0, 0.0, 30.0, Double.PositiveInfinity))
         .setInputCol("ArrDelay")
         .setOutputCol("ArrDelayBucket")
-        .setSplits(Array(Double.NegativeInfinity, 0.0, 30.0, 60.0, Double.PositiveInfinity))
 
-      val bucketizerModel = bucketizer.fit(dfClean)
-      bucketizerModel.write.overwrite().save(modelPath("arrival_bucketizer_2.0.bin", modelBase))
+      arrivalBucketizer.write.overwrite().save(s"$modelBasePath/arrival_bucketizer_2.0.bin")
+      var mlFeatures = arrivalBucketizer.transform(featuresWithRoute)
 
-      val dfBucketed = bucketizerModel.transform(dfClean)
+      Seq("Carrier", "Origin", "Dest", "Route").foreach { column =>
+        val indexer = new StringIndexer()
+          .setInputCol(column)
+          .setOutputCol(column + "_index")
+          .setHandleInvalid("keep")
 
-      // String indexers
-      val carrierIndexer = new StringIndexer().setInputCol("Carrier").setOutputCol("CarrierIndex").setHandleInvalid("keep")
-      val originIndexer  = new StringIndexer().setInputCol("Origin").setOutputCol("OriginIndex").setHandleInvalid("keep")
-      val destIndexer    = new StringIndexer().setInputCol("Dest").setOutputCol("DestIndex").setHandleInvalid("keep")
-      val routeIndexer   = new StringIndexer().setInputCol("Route").setOutputCol("RouteIndex").setHandleInvalid("keep")
-
-      val carrierModel = carrierIndexer.fit(dfBucketed)
-      val originModel  = originIndexer.fit(dfBucketed)
-      val destModel    = destIndexer.fit(dfBucketed)
-      val routeModel   = routeIndexer.fit(dfBucketed)
-
-      carrierModel.write.overwrite().save(modelPath("string_indexer_model_Carrier.bin", modelBase))
-      originModel.write.overwrite().save(modelPath("string_indexer_model_Origin.bin", modelBase))
-      destModel.write.overwrite().save(modelPath("string_indexer_model_Dest.bin", modelBase))
-      routeModel.write.overwrite().save(modelPath("string_indexer_model_Route.bin", modelBase))
-
-      val dfIndexed = routeModel.transform(destModel.transform(originModel.transform(carrierModel.transform(dfBucketed))))
-
-      // Vector assembler
-      val assembler = new VectorAssembler()
-        .setInputCols(Array("DepDelay", "DayOfYear", "DayOfMonth", "DayOfWeek",
-          "CarrierIndex", "OriginIndex", "DestIndex", "RouteIndex", "Distance"))
-        .setOutputCol("features")
-        .setHandleInvalid("skip")
-
-      val assemblerModel = assembler.fit(dfIndexed)
-      assemblerModel.write.overwrite().save(modelPath("numeric_vector_assembler.bin", modelBase))
-
-      val dfFeatures = assemblerModel.transform(dfIndexed)
-
-      // Train/test split
-      val Array(trainDF, testDF) = dfFeatures.randomSplit(Array(0.8, 0.2), seed = 42)
-
-      // Random Forest
-      val rf = new RandomForestClassifier()
-        .setLabelCol("ArrDelayBucket")
-        .setFeaturesCol("features")
-        .setNumTrees(5)
-        .setMaxDepth(10)
-        .setMaxBins(256)
-        .setSeed(42)
-
-      val rfModel = rf.fit(trainDF)
-      rfModel.write.overwrite().save(modelPath("spark_random_forest_classifier.flight_delays.5.0.bin", modelBase))
-
-      // Evaluate
-      val predictions = rfModel.transform(testDF)
-      val total = predictions.count().toDouble
-      val correct = predictions.filter(col("prediction") === col("ArrDelayBucket")).count().toDouble
-      val accuracy = correct / total
-      println(s"Accuracy = $accuracy")
-
-      // Prediction distribution
-      predictions.groupBy("prediction").count().orderBy("prediction").collect().foreach { row =>
-        println(s"Prediction ${row.getAs[Double]("prediction").toInt}: ${row.getAs[Long]("count")}")
+        val model = indexer.fit(mlFeatures)
+        mlFeatures = model.transform(mlFeatures).drop(column)
+        model.write.overwrite().save(s"$modelBasePath/string_indexer_model_$column.bin")
       }
 
-      // Log to MLflow
-      if (runId.nonEmpty) {
-        mlflow.logParam(runId, "algorithm", "RandomForest")
-        mlflow.logParam(runId, "num_trees", "5")
-        mlflow.logParam(runId, "max_depth", "10")
-        mlflow.logParam(runId, "max_bins", "256")
-        mlflow.logParam(runId, "deploy_mode", spark.sparkContext.deployMode)
-        mlflow.logMetric(runId, "accuracy", accuracy)
-        mlflow.logMetric(runId, "training_records", count.toDouble)
-        mlflow.finishRun(runId)
+      val numericColumns = Array("DepDelay", "Distance", "DayOfMonth", "DayOfWeek", "DayOfYear")
+      val indexColumns = Array("Carrier_index", "Origin_index", "Dest_index", "Route_index")
+      val vectorAssembler = new VectorAssembler()
+        .setInputCols(numericColumns ++ indexColumns)
+        .setOutputCol("Features_vec")
+        .setHandleInvalid("keep")
+
+      vectorAssembler.write.overwrite().save(s"$modelBasePath/numeric_vector_assembler.bin")
+      val finalVectorizedFeatures = vectorAssembler.transform(mlFeatures).drop(indexColumns: _*)
+
+      val classifier = new RandomForestClassifier()
+        .setFeaturesCol("Features_vec")
+        .setLabelCol("ArrDelayBucket")
+        .setPredictionCol("Prediction")
+        .setNumTrees(numTrees)
+        .setMaxDepth(maxDepth)
+        .setMaxBins(maxBins)
+        .setMaxMemoryInMB(1024)
+
+      val model = classifier.fit(finalVectorizedFeatures)
+      model.write.overwrite().save(s"$modelBasePath/spark_random_forest_classifier.flight_delays.5.0.bin")
+
+      val predictions = model.transform(finalVectorizedFeatures)
+      val evaluator = new MulticlassClassificationEvaluator()
+        .setPredictionCol("Prediction")
+        .setLabelCol("ArrDelayBucket")
+        .setMetricName("accuracy")
+      val accuracy = evaluator.evaluate(predictions)
+      println("Accuracy = " + accuracy)
+      predictions.groupBy("Prediction").count().show()
+
+      runId.foreach { id =>
+        MlflowRestClient.logMetric(mlflowUri, id, "accuracy", accuracy)
+        MlflowRestClient.finishRun(mlflowUri, id, "FINISHED")
       }
 
       println("Training completed successfully")
     } catch {
       case e: Exception =>
-        println(s"Training failed: ${e.getMessage}")
-        e.printStackTrace()
-        if (runId.nonEmpty) mlflow.finishRun(runId, "FAILED")
+        runId.foreach(id => Try(MlflowRestClient.finishRun(mlflowUri, id, "FAILED")))
         throw e
     } finally {
       spark.stop()

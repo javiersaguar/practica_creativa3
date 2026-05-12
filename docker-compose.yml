@@ -58,6 +58,8 @@ services:
   spark-master:
     build: ./docker/spark
     container_name: spark-master
+    volumes:
+      - ./shared-jars:/shared-jars
     command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
     ports:
       - "8080:8080"
@@ -70,6 +72,8 @@ services:
   spark-worker-1:
     build: ./docker/spark
     container_name: spark-worker-1
+    volumes:
+      - ./shared-jars:/shared-jars
     command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
     depends_on:
       - spark-master
@@ -83,6 +87,8 @@ services:
   spark-worker-2:
     build: ./docker/spark
     container_name: spark-worker-2
+    volumes:
+      - ./shared-jars:/shared-jars
     command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
     depends_on:
       - spark-master
@@ -96,6 +102,8 @@ services:
   spark-predictor:
     build: ./docker/spark
     container_name: spark-predictor
+    profiles:
+      - predictor
     depends_on:
       - kafka
       - mongo
@@ -103,30 +111,21 @@ services:
       - minio
       - spark-master
     environment:
-      PROJECT_HOME: /app
-      MODEL_BASE_PATH: s3a://flight-data/models
-      S3_ENDPOINT: http://minio:9000
-      AWS_ACCESS_KEY_ID: minioadmin
-      AWS_SECRET_ACCESS_KEY: minioadmin
-      CASSANDRA_HOST: cassandra
-      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-      MONGO_URI: mongodb://mongo:27017
       SPARK_USER: spark
-      IVY_HOME: /tmp/.ivy2
     volumes:
-      - ./flight_prediction/target/scala-2.13:/app/jars
-      - ivy_cache:/tmp/.ivy2
+      - ./shared-jars:/shared-jars
     command: >
       /opt/spark/bin/spark-submit
       --master spark://spark-master:7077
+      --deploy-mode cluster
+      --supervise
       --class es.upm.dit.ging.predictor.MakePrediction
-      --packages org.apache.spark:spark-sql-kafka-0-10_2.13:4.1.1,org.mongodb.spark:mongo-spark-connector_2.13:10.4.1,com.datastax.spark:spark-cassandra-connector_2.13:3.5.1,org.apache.hadoop:hadoop-aws:3.4.2,com.amazonaws:aws-java-sdk-bundle:1.12.367
-      --conf spark.driver.host=spark-predictor
-      --conf spark.driver.bindAddress=0.0.0.0
-      --conf spark.driver.port=7078
-      --conf spark.blockManager.port=7079
+      --conf spark.standalone.submit.waitAppCompletion=false
+      --conf spark.driver.memory=1g
+      --conf spark.executor.memory=1g
+      --conf spark.executor.cores=1
+      --conf spark.jars.ivy=/home/spark/.ivy2
       --conf spark.cassandra.connection.host=cassandra
-      --conf spark.jars.ivy=/tmp/.ivy2
       --conf spark.hadoop.fs.s3a.endpoint=http://minio:9000
       --conf spark.hadoop.fs.s3a.access.key=minioadmin
       --conf spark.hadoop.fs.s3a.secret.key=minioadmin
@@ -134,7 +133,17 @@ services:
       --conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem
       --conf spark.hadoop.fs.s3a.connection.ssl.enabled=false
       --conf spark.hadoop.fs.s3a.aws.credentials.provider=org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider
-      /app/jars/flight_prediction_2.13-0.1.jar
+      --conf spark.driverEnv.MODEL_BASE_PATH=s3a://flight-data/models
+      --conf spark.driverEnv.CHECKPOINT_BASE_PATH=s3a://flight-data/checkpoints/predictor
+      --conf spark.driverEnv.KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      --conf "spark.driver.extraJavaOptions=-DKAFKA_BOOTSTRAP_SERVERS=kafka:9092 -DMONGO_URI=mongodb://mongo:27017 -DCASSANDRA_HOST=cassandra -DMODEL_BASE_PATH=s3a://flight-data/models -DCHECKPOINT_BASE_PATH=s3a://flight-data/checkpoints/predictor -DS3_ENDPOINT=http://minio:9000 -DAWS_ACCESS_KEY_ID=minioadmin -DAWS_SECRET_ACCESS_KEY=minioadmin"
+      --conf spark.driverEnv.MONGO_URI=mongodb://mongo:27017
+      --conf spark.driverEnv.CASSANDRA_HOST=cassandra
+      --conf spark.driverEnv.S3_ENDPOINT=http://minio:9000
+      --conf spark.driverEnv.AWS_ACCESS_KEY_ID=minioadmin
+      --conf spark.driverEnv.AWS_SECRET_ACCESS_KEY=minioadmin
+      --conf spark.hadoop.fs.s3a.endpoint=http://minio:9000
+      file:///shared-jars/flight_prediction_2.13-0.1.jar
     networks:
       - practica_net
 
@@ -210,7 +219,7 @@ services:
       - ./docker/airflow/dags:/opt/airflow/dags
       - airflow_data:/opt/airflow
       - /var/run/docker.sock:/var/run/docker.sock
-      - /home/javisaguarantona/practica_creativa/resources:/opt/spark/resources
+      - /home/javisaguarantona/practica_creativa_deploy_mode/resources:/opt/spark/resources
     command: >
       bash -c "airflow db migrate &&
                airflow webserver --port 8080 & airflow scheduler"

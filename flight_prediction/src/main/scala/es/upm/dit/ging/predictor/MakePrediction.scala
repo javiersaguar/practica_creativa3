@@ -18,12 +18,12 @@ object MakePrediction {
     import spark.implicits._
 
     val hadoopConf = spark.sparkContext.hadoopConfiguration
-    hadoopConf.set("fs.s3a.endpoint", sys.env.getOrElse("S3_ENDPOINT", "http://minio:9000"))
-    hadoopConf.set("fs.s3a.access.key", sys.env.getOrElse("AWS_ACCESS_KEY_ID", "minioadmin"))
-    hadoopConf.set("fs.s3a.secret.key", sys.env.getOrElse("AWS_SECRET_ACCESS_KEY", "minioadmin"))
-    hadoopConf.set("fs.s3a.path.style.access", sys.env.getOrElse("S3_PATH_STYLE_ACCESS", "true"))
+    hadoopConf.set("fs.s3a.endpoint", sys.env.getOrElse("S3_ENDPOINT", sys.props.getOrElse("S3_ENDPOINT", "http://minio:9000")))
+    hadoopConf.set("fs.s3a.access.key", sys.env.getOrElse("AWS_ACCESS_KEY_ID", sys.props.getOrElse("AWS_ACCESS_KEY_ID", "minioadmin")))
+    hadoopConf.set("fs.s3a.secret.key", sys.env.getOrElse("AWS_SECRET_ACCESS_KEY", sys.props.getOrElse("AWS_SECRET_ACCESS_KEY", "minioadmin")))
+    hadoopConf.set("fs.s3a.path.style.access", sys.env.getOrElse("S3_PATH_STYLE_ACCESS", sys.props.getOrElse("S3_PATH_STYLE_ACCESS", "true")))
     hadoopConf.set("fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
-    hadoopConf.set("fs.s3a.connection.ssl.enabled", sys.env.getOrElse("S3_SSL_ENABLED", "false"))
+    hadoopConf.set("fs.s3a.connection.ssl.enabled", sys.env.getOrElse("S3_SSL_ENABLED", sys.props.getOrElse("S3_SSL_ENABLED", "false")))
     hadoopConf.set(
       "fs.s3a.aws.credentials.provider",
       "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider"
@@ -60,7 +60,7 @@ object MakePrediction {
     val df = spark
       .readStream
       .format("kafka")
-      .option("kafka.bootstrap.servers", sys.env.getOrElse("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092"))
+      .option("kafka.bootstrap.servers", sys.env.getOrElse("KAFKA_BOOTSTRAP_SERVERS", sys.props.getOrElse("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")))
       .option("subscribe", "flight-delay-ml-request")
       .load()
     df.printSchema()
@@ -156,7 +156,7 @@ object MakePrediction {
     val mongoWriter = finalPredictions
       .writeStream
       .format("mongodb")
-      .option("connection.uri", sys.env.getOrElse("MONGO_URI", "mongodb://127.0.0.1:27017"))
+      .option("connection.uri", sys.env.getOrElse("MONGO_URI", sys.props.getOrElse("MONGO_URI", "mongodb://127.0.0.1:27017")))
       .option("database", "agile_data_science")
       .option("collection", "flight_delay_ml_response")
       .option("checkpointLocation", "/tmp/checkpoint_mongo")
@@ -168,7 +168,7 @@ object MakePrediction {
       .selectExpr("CAST(UUID AS STRING) AS key", "to_json(struct(*)) AS value")
       .writeStream
       .format("kafka")
-      .option("kafka.bootstrap.servers", sys.env.getOrElse("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092"))
+      .option("kafka.bootstrap.servers", sys.env.getOrElse("KAFKA_BOOTSTRAP_SERVERS", sys.props.getOrElse("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")))
       .option("topic", "flight-delay-ml-response")
       .option("checkpointLocation", "/tmp/checkpoint_kafka")
       .outputMode("append")

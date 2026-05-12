@@ -1,9 +1,9 @@
 name := "flight_prediction"
 version := "0.1"
-assemblyJarName in assembly := "flight_prediction_2.13-0.1.jar"
+assembly / assemblyJarName := "flight_prediction_2.13-0.1.jar"
 scalaVersion := "2.13.16"
 val sparkVersion = "4.1.1"
-mainClass in Compile := Some("es.upm.dit.ging.predictor.MakePrediction")
+Compile / mainClass := Some("es.upm.dit.ging.predictor.MakePrediction")
 resolvers ++= Seq(
   "apache-snapshots" at "https://repository.apache.org/snapshots/"
 )
@@ -16,7 +16,7 @@ libraryDependencies ++= Seq(
   "org.mongodb.spark" %% "mongo-spark-connector" % "10.4.1" % "provided",
   "com.datastax.spark" %% "spark-cassandra-connector" % "3.5.1" % "provided"
 )
-assemblyMergeStrategy in assembly := {
+assembly / assemblyMergeStrategy := {
   case PathList("META-INF", "versions", "9", "module-info.class") => MergeStrategy.discard
   case PathList("META-INF", "native-image", _*) => MergeStrategy.first
   case PathList("META-INF", xs @ _*) => MergeStrategy.discard
