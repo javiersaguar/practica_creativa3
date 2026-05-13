@@ -159,7 +159,7 @@ object MakePrediction {
       .option("connection.uri", sys.env.getOrElse("MONGO_URI", sys.props.getOrElse("MONGO_URI", "mongodb://127.0.0.1:27017")))
       .option("database", "agile_data_science")
       .option("collection", "flight_delay_ml_response")
-      .option("checkpointLocation", "/tmp/checkpoint_mongo")
+      .option("checkpointLocation", s"$checkpointBasePath/mongo")
       .outputMode("append")
       .start()
 
@@ -170,7 +170,7 @@ object MakePrediction {
       .format("kafka")
       .option("kafka.bootstrap.servers", sys.env.getOrElse("KAFKA_BOOTSTRAP_SERVERS", sys.props.getOrElse("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")))
       .option("topic", "flight-delay-ml-response")
-      .option("checkpointLocation", "/tmp/checkpoint_kafka")
+      .option("checkpointLocation", s"$checkpointBasePath/kafka")
       .outputMode("append")
       .start()
 
@@ -196,7 +196,7 @@ object MakePrediction {
       .format("org.apache.spark.sql.cassandra")
       .option("keyspace", "agile_data_science")
       .option("table", "flight_delay_classification_response")
-      .option("checkpointLocation", "/tmp/checkpoint_cassandra")
+      .option("checkpointLocation", s"$checkpointBasePath/cassandra")
       .outputMode("append")
       .start()
 

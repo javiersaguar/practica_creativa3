@@ -207,7 +207,7 @@ services:
       - practica_net
 
   airflow:
-    image: apache/airflow:2.10.4
+    build: ./docker/airflow
     container_name: airflow
     user: root
     ports:
@@ -221,7 +221,7 @@ services:
       - ./docker/airflow/dags:/opt/airflow/dags
       - airflow_data:/opt/airflow
       - /var/run/docker.sock:/var/run/docker.sock
-      - /home/javisaguarantona/practica_creativa_deploy_mode/resources:/opt/spark/resources
+      - ./resources:/opt/spark/resources
     command: >
       bash -c "airflow db migrate &&
                airflow webserver --port 8080 & airflow scheduler"
