@@ -16,7 +16,7 @@ def spark_train_command(jar_uri):
   --master spark://spark-master:7077 \
   --deploy-mode cluster \
   --class es.upm.dit.ging.predictor.TrainModel \
-  --conf spark.standalone.submit.waitAppCompletion=true \
+  --conf spark.standalone.submit.waitAppCompletion=false \
   --conf spark.driver.memory=1g \
   --conf spark.executor.memory=1g \
   --conf spark.executor.cores=1 \
