@@ -32,7 +32,10 @@ object MakePrediction {
     println("Spark master: " + spark.sparkContext.master)
 
     val modelBasePath = sys.env
-      .getOrElse("MODEL_BASE_PATH", "s3a://flight-data/models")
+      .getOrElse("MODEL_BASE_PATH", sys.props.getOrElse("MODEL_BASE_PATH", "s3a://flight-data/models"))
+      .stripSuffix("/")
+    val checkpointBasePath = sys.env
+      .getOrElse("CHECKPOINT_BASE_PATH", sys.props.getOrElse("CHECKPOINT_BASE_PATH", "s3a://flight-data/checkpoints/predictor"))
       .stripSuffix("/")
 
     def modelPath(name: String): String = "%s/%s".format(modelBasePath, name)
