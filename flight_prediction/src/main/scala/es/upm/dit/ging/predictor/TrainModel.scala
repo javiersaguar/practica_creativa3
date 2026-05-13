@@ -102,21 +102,21 @@ object TrainModel {
     import spark.implicits._
 
     val hadoopConf = spark.sparkContext.hadoopConfiguration
-    hadoopConf.set("fs.s3a.endpoint", sys.env.getOrElse("S3_ENDPOINT", "http://minio:9000"))
-    hadoopConf.set("fs.s3a.access.key", sys.env.getOrElse("AWS_ACCESS_KEY_ID", "minioadmin"))
-    hadoopConf.set("fs.s3a.secret.key", sys.env.getOrElse("AWS_SECRET_ACCESS_KEY", "minioadmin"))
-    hadoopConf.set("fs.s3a.path.style.access", sys.env.getOrElse("S3_PATH_STYLE_ACCESS", "true"))
+    hadoopConf.set("fs.s3a.endpoint", sys.env.getOrElse("S3_ENDPOINT", sys.props.getOrElse("S3_ENDPOINT", "http://minio:9000")))
+    hadoopConf.set("fs.s3a.access.key", sys.env.getOrElse("AWS_ACCESS_KEY_ID", sys.props.getOrElse("AWS_ACCESS_KEY_ID", "minioadmin")))
+    hadoopConf.set("fs.s3a.secret.key", sys.env.getOrElse("AWS_SECRET_ACCESS_KEY", sys.props.getOrElse("AWS_SECRET_ACCESS_KEY", "minioadmin")))
+    hadoopConf.set("fs.s3a.path.style.access", sys.env.getOrElse("S3_PATH_STYLE_ACCESS", sys.props.getOrElse("S3_PATH_STYLE_ACCESS", "true")))
     hadoopConf.set("fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
-    hadoopConf.set("fs.s3a.connection.ssl.enabled", sys.env.getOrElse("S3_SSL_ENABLED", "false"))
+    hadoopConf.set("fs.s3a.connection.ssl.enabled", sys.env.getOrElse("S3_SSL_ENABLED", sys.props.getOrElse("S3_SSL_ENABLED", "false")))
     hadoopConf.set("fs.s3a.aws.credentials.provider", "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider")
 
     println("Spark master: " + spark.sparkContext.master)
     println("Spark deploy mode: " + spark.conf.get("spark.submit.deployMode", "client"))
 
-    val trainingTable = sys.env.getOrElse("TRAINING_TABLE", "minio.flights.training_data")
-    val modelBasePath = sys.env.getOrElse("MODEL_BASE_PATH", "s3a://flight-data/models").stripSuffix("/")
-    val mlflowUri = sys.env.getOrElse("MLFLOW_TRACKING_URI", "http://mlflow:5000")
-    val experimentName = sys.env.getOrElse("MLFLOW_EXPERIMENT_NAME", "flight_delay_prediction")
+    val trainingTable = sys.env.getOrElse("TRAINING_TABLE", sys.props.getOrElse("TRAINING_TABLE", "minio.flights.training_data"))
+    val modelBasePath = sys.env.getOrElse("MODEL_BASE_PATH", sys.props.getOrElse("MODEL_BASE_PATH", "s3a://flight-data/models")).stripSuffix("/")
+    val mlflowUri = sys.env.getOrElse("MLFLOW_TRACKING_URI", sys.props.getOrElse("MLFLOW_TRACKING_URI", "http://mlflow:5000"))
+    val experimentName = sys.env.getOrElse("MLFLOW_EXPERIMENT_NAME", sys.props.getOrElse("MLFLOW_EXPERIMENT_NAME", "flight_delay_prediction"))
     val maxBins = sys.env.get("MAX_BINS").flatMap(v => Try(v.toInt).toOption).getOrElse(4657)
     val maxDepth = sys.env.get("MAX_DEPTH").flatMap(v => Try(v.toInt).toOption).getOrElse(10)
     val numTrees = sys.env.get("NUM_TREES").flatMap(v => Try(v.toInt).toOption).getOrElse(5)

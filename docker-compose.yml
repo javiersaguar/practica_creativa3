@@ -136,7 +136,7 @@ services:
       --conf spark.driverEnv.MODEL_BASE_PATH=s3a://flight-data/models
       --conf spark.driverEnv.CHECKPOINT_BASE_PATH=s3a://flight-data/checkpoints/predictor
       --conf spark.driverEnv.KAFKA_BOOTSTRAP_SERVERS=kafka:9092
-      --conf "spark.driver.extraJavaOptions=-DKAFKA_BOOTSTRAP_SERVERS=kafka:9092 -DMONGO_URI=mongodb://mongo:27017 -DCASSANDRA_HOST=cassandra -DMODEL_BASE_PATH=s3a://flight-data/models -DCHECKPOINT_BASE_PATH=s3a://flight-data/checkpoints/predictor -DS3_ENDPOINT=http://minio:9000 -DAWS_ACCESS_KEY_ID=minioadmin -DAWS_SECRET_ACCESS_KEY=minioadmin"
+      --conf "spark.driver.extraJavaOptions=-DKAFKA_BOOTSTRAP_SERVERS=kafka:9092 -DMONGO_URI=mongodb://mongo:27017 -DCASSANDRA_HOST=cassandra -DMODEL_BASE_PATH=s3a://flight-data/models -DCHECKPOINT_BASE_PATH=s3a://flight-data/checkpoints/predictor -DS3_ENDPOINT=http://minio:9000 -DAWS_ACCESS_KEY_ID=minioadmin -DAWS_SECRET_ACCESS_KEY=minioadmin -DMLFLOW_TRACKING_URI=http://mlflow:5000"
       --conf spark.driverEnv.MONGO_URI=mongodb://mongo:27017
       --conf spark.driverEnv.CASSANDRA_HOST=cassandra
       --conf spark.driverEnv.S3_ENDPOINT=http://minio:9000
