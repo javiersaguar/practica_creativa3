@@ -1,14 +1,61 @@
 from airflow import DAG
 from airflow.operators.bash import BashOperator
 from datetime import datetime, timedelta
-import os
 
-default_args = {
-    "owner": "practica",
-    "retries": 0,
+default_args = {"owner": "practica", "retries": 0}
+
+bash_cmd = r'''
+set -euo pipefail
+
+echo "=== Kill Spark drivers ==="
+python3 <<'INNER'
+import json, time, urllib.request
+
+MASTER_JSON = "http://spark-master:8080/json/"
+KILL_URL = "http://spark-master:6066/v1/submissions/kill/"
+
+def get_master():
+    with urllib.request.urlopen(MASTER_JSON, timeout=10) as r:
+        return json.load(r)
+
+def kill_driver(driver_id):
+    req = urllib.request.Request(KILL_URL + driver_id, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            print("kill", driver_id, r.read().decode("utf-8", "ignore"))
+    except Exception as exc:
+        print("kill failed", driver_id, exc)
+
+for d in get_master().get("activedrivers", []):
+    mainclass = d.get("mainclass", "")
+    if "MakePrediction" in mainclass or "TrainModel" in mainclass:
+        print("Stopping", d["id"], mainclass, d.get("state"))
+        kill_driver(d["id"])
+
+for _ in range(30):
+    time.sleep(2)
+    busy = [
+        d for d in get_master().get("activedrivers", [])
+        if "MakePrediction" in d.get("mainclass", "") or "TrainModel" in d.get("mainclass", "")
+    ]
+    if not busy:
+        print("Spark drivers cleared")
+        break
+    print("Waiting:", [(d.get("id"), d.get("state")) for d in busy])
+else:
+    raise RuntimeError("Spark drivers did not stop in time")
+INNER
+
+docker stop spark-predictor || true
+
+cleanup() {
+  echo "=== Restart predictor ==="
+  docker start spark-predictor || true
 }
+trap cleanup EXIT
 
-TRAIN_CMD = r"""/opt/spark/bin/spark-submit \
+echo "=== TrainModel cluster mode ==="
+docker exec spark-master /opt/spark/bin/spark-submit \
   --master spark://spark-master:7077 \
   --deploy-mode cluster \
   --class es.upm.dit.ging.predictor.TrainModel \
@@ -37,35 +84,10 @@ TRAIN_CMD = r"""/opt/spark/bin/spark-submit \
   --conf spark.sql.catalog.minio=org.apache.iceberg.spark.SparkCatalog \
   --conf spark.sql.catalog.minio.type=hadoop \
   --conf spark.sql.catalog.minio.warehouse=s3a://flight-data/warehouse \
-  file:///shared-jars/flight_prediction_2.13-0.1.jar"""
-
-IN_K8S = os.path.exists("/var/run/secrets/kubernetes.io")
-
-if IN_K8S:
-    bash_cmd = "echo 'Usa el DAG K8S especifico para GKE'; exit 1"
-else:
-    bash_cmd = f"""
-set -euo pipefail
-
-echo "=== Preflight ==="
-docker ps --format "table {{{{.Names}}}}\\t{{{{.Status}}}}" | grep -E "spark|mlflow|airflow|minio" || true
-docker exec spark-worker-1 getent hosts mlflow || true
-docker exec spark-worker-2 getent hosts mlflow || true
-
-echo "=== Stop predictor to free Spark resources ==="
-docker stop spark-predictor || true
-
-cleanup() {{
-  echo "=== Restart predictor ==="
-  docker start spark-predictor || true
-}}
-trap cleanup EXIT
-
-echo "=== Submit TrainModel in Spark cluster mode and wait ==="
-docker exec spark-master bash -lc '{TRAIN_CMD}'
+  file:///shared-jars/flight_prediction_2.13-0.1.jar
 
 echo "=== Training finished ==="
-"""
+'''
 
 with DAG(
     "retrain_flight_delay_model",
@@ -78,5 +100,5 @@ with DAG(
     BashOperator(
         task_id="train_model_cluster_mode",
         bash_command=bash_cmd,
-        execution_timeout=timedelta(minutes=40),
+        execution_timeout=timedelta(minutes=45),
     )

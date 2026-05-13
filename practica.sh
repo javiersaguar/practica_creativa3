@@ -154,10 +154,21 @@ CREATE KEYSPACE IF NOT EXISTS agile_data_science
 WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1};
 CREATE TABLE IF NOT EXISTS agile_data_science.origin_dest_distances (
   origin TEXT, dest TEXT, distance DOUBLE, PRIMARY KEY (origin, dest));
+DROP TABLE IF EXISTS agile_data_science.flight_delay_classification_response;
 CREATE TABLE IF NOT EXISTS agile_data_science.flight_delay_classification_response (
-  origin TEXT, dest TEXT, flight_date TEXT, dep_delay DOUBLE,
-  carrier TEXT, uuid TEXT, prediction DOUBLE, timestamp TIMESTAMP,
-  PRIMARY KEY (uuid));" 2>/dev/null && ok "Keyspace creado" || warn "Error Cassandra"
+  uuid TEXT PRIMARY KEY,
+  origin TEXT,
+  dayofweek INT,
+  dayofyear INT,
+  dayofmonth INT,
+  dest TEXT,
+  depdelay DOUBLE,
+  timestamp TIMESTAMP,
+  flightdate DATE,
+  carrier TEXT,
+  distance DOUBLE,
+  route TEXT,
+  prediction DOUBLE);" 2>/dev/null && ok "Keyspace creado" || warn "Error Cassandra"
 
   info "Importando distancias en Cassandra..."
   python3 -c "
@@ -292,10 +303,21 @@ CREATE KEYSPACE IF NOT EXISTS agile_data_science
 WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1};
 CREATE TABLE IF NOT EXISTS agile_data_science.origin_dest_distances (
   origin TEXT, dest TEXT, distance DOUBLE, PRIMARY KEY (origin, dest));
+DROP TABLE IF EXISTS agile_data_science.flight_delay_classification_response;
 CREATE TABLE IF NOT EXISTS agile_data_science.flight_delay_classification_response (
-  origin TEXT, dest TEXT, flight_date TEXT, dep_delay DOUBLE,
-  carrier TEXT, uuid TEXT, prediction DOUBLE, timestamp TIMESTAMP,
-  PRIMARY KEY (uuid));" 2>/dev/null && ok "Keyspace y tablas creados" || warn "Error creando tablas Cassandra"
+  uuid TEXT PRIMARY KEY,
+  origin TEXT,
+  dayofweek INT,
+  dayofyear INT,
+  dayofmonth INT,
+  dest TEXT,
+  depdelay DOUBLE,
+  timestamp TIMESTAMP,
+  flightdate DATE,
+  carrier TEXT,
+  distance DOUBLE,
+  route TEXT,
+  prediction DOUBLE);" 2>/dev/null && ok "Keyspace y tablas creados" || warn "Error creando tablas Cassandra"
 
   info "Importando distancias en Cassandra..."
   python3 << 'PYEOF'

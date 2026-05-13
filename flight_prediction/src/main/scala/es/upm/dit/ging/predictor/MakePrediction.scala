@@ -13,7 +13,7 @@ object MakePrediction {
 
     val spark = SparkSession
       .builder
-      .appName("StructuredNetworkWordCount")
+      .appName("FlightDelayPredictionStreaming")
       .getOrCreate()
     import spark.implicits._
 
@@ -30,6 +30,7 @@ object MakePrediction {
     )
 
     println("Spark master: " + spark.sparkContext.master)
+    println("Spark deploy mode: " + spark.conf.get("spark.submit.deployMode", "client"))
 
     val modelBasePath = sys.env
       .getOrElse("MODEL_BASE_PATH", sys.props.getOrElse("MODEL_BASE_PATH", "s3a://flight-data/models"))
@@ -108,29 +109,13 @@ object MakePrediction {
                 )
     )
 
-    // Dataframe for Vectorizing numeric columns
-    val flightFlattenedDf2 = flightNestedDf.selectExpr("flight.Origin",
-      "flight.DayOfWeek","flight.DayOfYear","flight.DayOfMonth","flight.Dest",
-      "flight.DepDelay","flight.Timestamp","flight.FlightDate",
-      "flight.Carrier","flight.UUID","flight.Distance",
-      "flight.Carrier_index","flight.Origin_index","flight.Dest_index","flight.Route_index")
-    flightFlattenedDf2.printSchema()
-
-    val predictionRequestsWithRouteMod2 = flightFlattenedDf2.withColumn(
-      "Route",
-      concat(
-        flightFlattenedDf2("Origin"),
-        lit('-'),
-        flightFlattenedDf2("Dest")
-      )
-    )
-
-    // Vectorize string fields with the corresponding pipeline for that column
-    // Turn category fields into categoric feature vectors, then drop intermediate fields
-    val predictionRequestsWithRoute = stringIndexerModel.map(n=>n.transform(predictionRequestsWithRouteMod))
+    // Vectorize string fields with the saved indexer models.
+    val indexedFeatures = columns.foldLeft(predictionRequestsWithRouteMod) { (df, column) =>
+      stringIndexerModels(column).transform(df)
+    }
 
     //Vectorize numeric columns: DepDelay, Distance and index columns
-    val vectorizedFeatures = vectorAssembler.setHandleInvalid("keep").transform(predictionRequestsWithRouteMod2)
+    val vectorizedFeatures = vectorAssembler.setHandleInvalid("keep").transform(indexedFeatures)
 
     // Inspect the vectors
     vectorizedFeatures.printSchema()
@@ -209,7 +194,7 @@ object MakePrediction {
       .format("console")
       .start()
 
-    consoleOutput.awaitTermination()
+    spark.streams.awaitAnyTermination()
   }
 
 }

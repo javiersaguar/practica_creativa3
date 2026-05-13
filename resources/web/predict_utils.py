@@ -37,6 +37,8 @@ def get_flight_distance(cassandra_session, origin, dest):
     "SELECT distance FROM origin_dest_distances WHERE origin=%s AND dest=%s",
     (origin, dest)
   ).one()
+  if row is None:
+    raise ValueError("Distance not found in Cassandra for route {}-{}".format(origin, dest))
   return row.distance
 
 def get_regression_date_args(iso_date):

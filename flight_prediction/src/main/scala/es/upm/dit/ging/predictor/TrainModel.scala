@@ -51,6 +51,11 @@ object TrainModel {
       val encodedName = URLEncoder.encode(name, StandardCharsets.UTF_8.toString)
       val getResponse = Try {
         request(baseUri, "GET", s"/api/2.0/mlflow/experiments/get-by-name?experiment_name=$encodedName")
+      }.orElse {
+        Try {
+          val body = s"""{"experiment_name":"${escapeJson(name)}"}"""
+          request(baseUri, "POST", "/api/2.0/mlflow/experiments/get-by-name", Some(body))
+        }
       }.toOption
 
       getResponse
@@ -137,7 +142,8 @@ object TrainModel {
       }
     } catch {
       case e: Exception =>
-        println("MLflow tracking disabled for this run: " + e.getMessage)
+        System.err.println("MLflow tracking failed: " + e.getMessage)
+        throw e
     }
 
     try {
