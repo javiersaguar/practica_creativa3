@@ -47,6 +47,8 @@ ok()   { echo -e "  ${GREEN}OK${NC} $1"; }
 info() { echo -e "  ${CYAN}->${NC} $1"; }
 warn() { echo -e "  ${YELLOW}!!${NC} $1"; }
 err()  { echo -e "  ${RED}XX${NC} $1"; }
+pass_check() { echo -e "  ${GREEN}✓${NC} $1"; }
+fail_check() { echo -e "  ${RED}✗${NC} $1"; }
 
 pause() {
   echo ""
@@ -1086,6 +1088,323 @@ diag_airflow() {
   pause
 }
 
+diag_test_e2e_docker() {
+  header "TEST END-TO-END AUTOMATICO -- DOCKER"
+
+  local endpoint="http://localhost:5001/flights/delays/predict/classify_realtime"
+  local payload="DepDelay=15&Carrier=AA&FlightDate=2016-12-25&Origin=ATL&Dest=SFO&FlightNum=1234"
+  local response body http_code uuid result result_body status prediction label
+
+  info "Enviando prediccion a Flask Docker..."
+  response=$(curl -s -w "\nHTTP_CODE=%{http_code}\n" -X POST "$endpoint" -d "$payload" 2>/dev/null)
+  http_code=$(printf "%s\n" "$response" | awk -F= '/^HTTP_CODE=/{print $2}' | tail -1)
+  body=$(printf "%s" "$response" | sed '/^HTTP_CODE=/d')
+
+  if [ "$http_code" = "200" ]; then
+    pass_check "Flask acepto la peticion (HTTP 200)"
+  else
+    fail_check "Flask no respondio correctamente (HTTP ${http_code:-N/A})"
+    echo "$body"
+    pause
+    return
+  fi
+
+  uuid=$(JSON_BODY="$body" python3 -c 'import os,json; d=json.loads(os.environ.get("JSON_BODY","{}")); print(d.get("id",""))' 2>/dev/null)
+  if [ -z "$uuid" ]; then
+    fail_check "No se pudo extraer UUID de la respuesta"
+    echo "$body"
+    pause
+    return
+  fi
+  pass_check "UUID generado: $uuid"
+
+  info "Esperando respuesta de Spark/Kafka (max 60s)..."
+  status="TIMEOUT"
+  for _ in $(seq 1 20); do
+    result=$(curl -s -w "\nHTTP_CODE=%{http_code}\n" "$endpoint/response/$uuid" 2>/dev/null)
+    result_body=$(printf "%s" "$result" | sed '/^HTTP_CODE=/d')
+    status=$(JSON_BODY="$result_body" python3 -c 'import os,json; d=json.loads(os.environ.get("JSON_BODY","{}")); print(d.get("status",""))' 2>/dev/null)
+    [ "$status" = "OK" ] && break
+    sleep 3
+  done
+
+  if [ "$status" = "OK" ]; then
+    pass_check "Respuesta recibida por polling REST"
+  else
+    fail_check "No se recibio respuesta en 60s"
+  fi
+
+  prediction=$(JSON_BODY="$result_body" python3 -c 'import os,json; d=json.loads(os.environ.get("JSON_BODY","{}")); print(d.get("prediction",{}).get("Prediction",""))' 2>/dev/null)
+  case "$prediction" in
+    0|0.0) label="no delay" ;;
+    1|1.0) label="small delay" ;;
+    2|2.0) label="moderate delay" ;;
+    3|3.0) label="severe delay" ;;
+    *) label="desconocida" ;;
+  esac
+  echo ""
+  echo -e "  ${BOLD}Prediction:${NC} ${prediction:-N/A} ($label)"
+
+  subheader "Verificacion de sinks"
+  local mongo_count cassandra_hit kafka_hit
+  mongo_count=$(docker exec mongo mongosh --quiet agile_data_science \
+    --eval "db.flight_delay_ml_response.countDocuments({UUID: '$uuid'})" 2>/dev/null | tail -1 | tr -d '[:space:]')
+  [ "${mongo_count:-0}" -gt 0 ] 2>/dev/null && pass_check "MongoDB contiene UUID $uuid" || fail_check "MongoDB no contiene UUID $uuid"
+
+  cassandra_hit=$(docker exec cassandra cqlsh -e \
+    "SELECT uuid FROM agile_data_science.flight_delay_classification_response WHERE uuid='$uuid';" 2>/dev/null | grep "$uuid" | head -1)
+  [ -n "$cassandra_hit" ] && pass_check "Cassandra contiene UUID $uuid" || fail_check "Cassandra no contiene UUID $uuid"
+
+  kafka_hit=$(docker exec kafka /opt/kafka/bin/kafka-console-consumer.sh \
+    --bootstrap-server localhost:9092 \
+    --topic flight-delay-ml-response \
+    --from-beginning --timeout-ms 5000 --max-messages 1000 2>/dev/null | grep "$uuid" | tail -1)
+  [ -n "$kafka_hit" ] && pass_check "Kafka response topic contiene UUID $uuid" || fail_check "Kafka response topic no muestra UUID $uuid"
+
+  pause
+}
+
+diag_test_e2e_k8s() {
+  header "TEST END-TO-END AUTOMATICO -- K8S"
+
+  if ! command -v kubectl >/dev/null 2>&1; then
+    err "kubectl no esta disponible"
+    pause
+    return
+  fi
+
+  local node_ip endpoint payload response body http_code uuid result result_body status prediction label
+  node_ip=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="ExternalIP")].address}' 2>/dev/null)
+  if [ -z "$node_ip" ]; then
+    err "No se pudo obtener la IP externa del nodo GKE"
+    pause
+    return
+  fi
+
+  endpoint="http://$node_ip:30001/flights/delays/predict/classify_realtime"
+  payload="DepDelay=10&Carrier=UA&FlightDate=2016-07-04&Origin=ORD&Dest=LAX&FlightNum=500"
+
+  info "Enviando prediccion a Flask K8s ($endpoint)..."
+  response=$(curl -s -w "\nHTTP_CODE=%{http_code}\n" -X POST "$endpoint" -d "$payload" 2>/dev/null)
+  http_code=$(printf "%s\n" "$response" | awk -F= '/^HTTP_CODE=/{print $2}' | tail -1)
+  body=$(printf "%s" "$response" | sed '/^HTTP_CODE=/d')
+
+  if [ "$http_code" = "200" ]; then
+    pass_check "Flask K8s acepto la peticion (HTTP 200)"
+  else
+    fail_check "Flask K8s no respondio correctamente (HTTP ${http_code:-N/A})"
+    echo "$body"
+    pause
+    return
+  fi
+
+  uuid=$(JSON_BODY="$body" python3 -c 'import os,json; d=json.loads(os.environ.get("JSON_BODY","{}")); print(d.get("id",""))' 2>/dev/null)
+  if [ -z "$uuid" ]; then
+    fail_check "No se pudo extraer UUID de la respuesta"
+    echo "$body"
+    pause
+    return
+  fi
+  pass_check "UUID generado: $uuid"
+
+  info "Esperando respuesta de Spark/Kafka en K8s (max 60s)..."
+  status="TIMEOUT"
+  for _ in $(seq 1 20); do
+    result=$(curl -s -w "\nHTTP_CODE=%{http_code}\n" "$endpoint/response/$uuid" 2>/dev/null)
+    result_body=$(printf "%s" "$result" | sed '/^HTTP_CODE=/d')
+    status=$(JSON_BODY="$result_body" python3 -c 'import os,json; d=json.loads(os.environ.get("JSON_BODY","{}")); print(d.get("status",""))' 2>/dev/null)
+    [ "$status" = "OK" ] && break
+    sleep 3
+  done
+
+  if [ "$status" = "OK" ]; then
+    pass_check "Respuesta recibida por polling REST"
+  else
+    fail_check "No se recibio respuesta en 60s"
+  fi
+
+  prediction=$(JSON_BODY="$result_body" python3 -c 'import os,json; d=json.loads(os.environ.get("JSON_BODY","{}")); print(d.get("prediction",{}).get("Prediction",""))' 2>/dev/null)
+  case "$prediction" in
+    0|0.0) label="no delay" ;;
+    1|1.0) label="small delay" ;;
+    2|2.0) label="moderate delay" ;;
+    3|3.0) label="severe delay" ;;
+    *) label="desconocida" ;;
+  esac
+  echo ""
+  echo -e "  ${BOLD}Prediction:${NC} ${prediction:-N/A} ($label)"
+
+  subheader "Verificacion de sinks K8s"
+  local mongo_count cassandra_hit kafka_hit
+  mongo_count=$(kubectl exec deployment/mongo -- mongosh --quiet agile_data_science \
+    --eval "db.flight_delay_ml_response.countDocuments({UUID: '$uuid'})" 2>/dev/null | tail -1 | tr -d '[:space:]')
+  [ "${mongo_count:-0}" -gt 0 ] 2>/dev/null && pass_check "MongoDB K8s contiene UUID $uuid" || fail_check "MongoDB K8s no contiene UUID $uuid"
+
+  cassandra_hit=$(kubectl exec deployment/cassandra -- cqlsh -e \
+    "SELECT uuid FROM agile_data_science.flight_delay_classification_response WHERE uuid='$uuid';" 2>/dev/null | grep "$uuid" | head -1)
+  [ -n "$cassandra_hit" ] && pass_check "Cassandra K8s contiene UUID $uuid" || fail_check "Cassandra K8s no contiene UUID $uuid"
+
+  kafka_hit=$(kubectl exec deployment/kafka -- /opt/kafka/bin/kafka-console-consumer.sh \
+    --bootstrap-server localhost:9092 \
+    --topic flight-delay-ml-response \
+    --from-beginning --timeout-ms 5000 --max-messages 1000 2>/dev/null | grep "$uuid" | tail -1)
+  [ -n "$kafka_hit" ] && pass_check "Kafka K8s response topic contiene UUID $uuid" || fail_check "Kafka K8s response topic no muestra UUID $uuid"
+
+  pause
+}
+
+diag_deploy_mode_cluster() {
+  header "DIAGNOSTICO -- DEPLOY-MODE CLUSTER"
+
+  subheader "Docker Spark Standalone"
+  python3 - <<'PY'
+import json
+import urllib.request
+
+try:
+    data = json.load(urllib.request.urlopen("http://localhost:8080/json/", timeout=10))
+except Exception as exc:
+    print(f"  ERROR leyendo Spark UI Docker: {exc}")
+    raise SystemExit(0)
+
+drivers = data.get("activedrivers", [])
+completed = data.get("completeddrivers", [])[:5]
+print(f"  Active drivers: {len(drivers)}")
+for driver in drivers:
+    worker = driver.get("worker")
+    print(f"  Driver ID: {driver.get('id')}")
+    print(f"    MainClass: {driver.get('mainclass')}")
+    print(f"    State: {driver.get('state')}")
+    print(f"    Worker: {worker or 'None'}")
+    print("    ✓ CLUSTER MODE: driver en worker" if worker else "    ✗ CLIENT MODE: sin worker")
+if completed:
+    print("  Completed drivers recientes:")
+    for driver in completed:
+        print(f"    {driver.get('id')} {driver.get('mainclass')} state={driver.get('state')} worker={driver.get('worker')}")
+
+workers = data.get("workers", [])
+print(f"  Workers activos: {len(workers)}")
+for worker in workers:
+    print(f"    {worker.get('id')}: cores={worker.get('coresused')}/{worker.get('cores')} mem={worker.get('memoryused')}/{worker.get('memory')}MB")
+PY
+
+  subheader "Docker stderr del driver mas reciente en workers"
+  echo "  spark-worker-1:"
+  docker exec spark-worker-1 bash -c "cat \$(ls -td /opt/spark/work/driver-*/stderr 2>/dev/null | head -1) 2>/dev/null | grep -E 'MicroBatch|bootstrap.servers|ERROR' | tail -5" 2>/dev/null || warn "No hay stderr reciente en spark-worker-1"
+  echo ""
+  echo "  spark-worker-2:"
+  docker exec spark-worker-2 bash -c "cat \$(ls -td /opt/spark/work/driver-*/stderr 2>/dev/null | head -1) 2>/dev/null | grep -E 'MicroBatch|bootstrap.servers|ERROR' | tail -5" 2>/dev/null || warn "No hay stderr reciente en spark-worker-2"
+
+  subheader "K8s Spark Standalone"
+  if command -v kubectl >/dev/null 2>&1; then
+    kubectl exec -i deployment/spark-master -- python3 - <<'PY' 2>/dev/null || echo "  No se pudo consultar spark-master en K8s"
+import json
+import re
+import urllib.request
+
+try:
+    data = json.load(urllib.request.urlopen("http://spark-master:8080/json/", timeout=10))
+except Exception as exc:
+    print(f"  ERROR leyendo Spark UI K8s: {exc}")
+    raise SystemExit(0)
+
+drivers = data.get("activedrivers", [])
+print(f"  Active drivers: {len(drivers)}")
+for driver in drivers:
+    worker = driver.get("worker")
+    print(f"  Driver ID: {driver.get('id')}")
+    print(f"    MainClass: {driver.get('mainclass')}")
+    print(f"    State: {driver.get('state')}")
+    print(f"    Worker: {worker or 'None'}")
+    try:
+        status = json.load(urllib.request.urlopen(
+            f"http://spark-master:6066/v1/submissions/status/{driver.get('id')}",
+            timeout=10,
+        ))
+        host_port = status.get("workerHostPort", "")
+        print(f"    REST State: {status.get('driverState')}")
+        print(f"    workerHostPort: {host_port}")
+        if re.match(r"^\d+\.\d+\.\d+\.\d+:", str(host_port)):
+            print("    ✓ CLUSTER MODE: workerHostPort es IP de pod")
+        else:
+            print("    ✗ Revisar: workerHostPort no parece IP")
+    except Exception as exc:
+        print(f"    REST status no disponible: {exc}")
+
+workers = data.get("workers", [])
+print(f"  Workers activos: {len(workers)}")
+for worker in workers:
+    print(f"    {worker.get('id')}: cores={worker.get('coresused')}/{worker.get('cores')} mem={worker.get('memoryused')}/{worker.get('memory')}MB")
+PY
+    echo ""
+    echo "  Pods spark-worker:"
+    kubectl get pods -l app=spark-worker -o wide 2>/dev/null || true
+  else
+    warn "kubectl no esta disponible"
+  fi
+
+  pause
+}
+
+diag_versiones() {
+  header "VERIFICACION DE VERSIONES DEL ENUNCIADO"
+
+  local spark_out spark_real scala_real kafka_version kafka_real mongo_real cassandra_real airflow_real mlflow_real python_real jar_classes
+  local zookeeper_count kafka_proc
+
+  spark_out=$(docker exec spark-master /opt/spark/bin/spark-submit --version 2>&1)
+  spark_real=$(echo "$spark_out" | grep -oE 'version [0-9]+\.[0-9]+\.[0-9]+' | head -1 | awk '{print $2}')
+  scala_real=$(echo "$spark_out" | sed -nE 's/.*Scala version ([0-9]+\.[0-9]+).*/\1/p' | head -1)
+  kafka_version=$(docker exec kafka /opt/kafka/bin/kafka-topics.sh --version 2>/dev/null | head -1)
+  zookeeper_count=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -ci zookeeper || true)
+  kafka_proc=$(docker exec kafka ps aux 2>/dev/null | grep -v grep | grep kafka | grep -v zookeeper | head -1)
+  if [ "$kafka_version" = "4.2.0" ] && [ "$zookeeper_count" = "0" ] && [ -n "$kafka_proc" ]; then
+    kafka_real="kafka_2.13-$kafka_version (KRaft, sin Zookeeper)"
+  else
+    kafka_real="${kafka_version:-N/A}"
+  fi
+  mongo_real=$(docker exec mongo mongosh --quiet --eval 'db.version()' 2>/dev/null | head -1)
+  cassandra_real=$(docker exec cassandra cqlsh -e "SELECT release_version FROM system.local;" 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+  airflow_real=$(docker exec airflow airflow version 2>/dev/null | head -1)
+  mlflow_real=$(docker exec mlflow mlflow --version 2>/dev/null | awk '{print $3}' | head -1)
+  if [ -z "$mlflow_real" ]; then
+    mlflow_real=$(curl -s http://localhost:5002/api/2.0/mlflow/experiments/search -H 'Content-Type: application/json' -d '{}' 2>/dev/null | python3 -c "import sys,json; json.load(sys.stdin); print('API OK')" 2>/dev/null)
+  fi
+  python_real=$(python3 --version 2>/dev/null | awk '{print $2}')
+  jar_classes=$(jar tf shared-jars/flight_prediction_2.13-0.1.jar 2>/dev/null | grep -c '\.class')
+
+  printf "  %-14s | %-24s | %-36s | %s\n" "Componente" "Version esperada" "Version real" "Estado"
+  printf "  %-14s-+-%-24s-+-%-36s-+-%s\n" "--------------" "------------------------" "------------------------------------" "------"
+  version_row() {
+    local component="$1" expected="$2" real="$3" condition="$4" state
+    if eval "$condition"; then
+      state="${GREEN}✓${NC}"
+    else
+      state="${RED}✗${NC}"
+    fi
+    printf "  %-14s | %-24s | %-36s | %b\n" "$component" "$expected" "${real:-N/A}" "$state"
+  }
+
+  version_row "Spark" "4.1.1" "$spark_real" "[[ \"$spark_real\" == \"4.1.1\" ]]"
+  version_row "Scala" "2.13" "$scala_real" "[[ \"$scala_real\" == \"2.13\" ]]"
+  version_row "Kafka" "kafka_2.13-4.2.0 KRaft" "$kafka_real" "[[ \"$kafka_real\" == *\"4.2.0\"* && \"$kafka_real\" == *\"KRaft\"* ]]"
+  version_row "MongoDB" "7.0.17" "$mongo_real" "[[ \"$mongo_real\" == \"7.0.17\" ]]"
+  version_row "Cassandra" "4.1" "$cassandra_real" "[[ \"$cassandra_real\" == 4.1* ]]"
+  version_row "Airflow" "2.10.4" "$airflow_real" "[[ \"$airflow_real\" == \"2.10.4\" ]]"
+  version_row "MLflow" "2.19.0" "$mlflow_real" "[[ \"$mlflow_real\" == \"2.19.0\" || \"$mlflow_real\" == \"API OK\" ]]"
+  version_row "Python" "3.10+" "$python_real" "[[ \"$python_real\" == 3.10* || \"$python_real\" == 3.11* || \"$python_real\" == 3.12* || \"$python_real\" == 3.13* ]]"
+
+  echo ""
+  echo "  JAR classes: ${jar_classes:-0}"
+  if [ "$zookeeper_count" = "0" ] && [ -n "$kafka_proc" ]; then
+    pass_check "KRaft mode confirmado (sin Zookeeper)"
+  else
+    warn "Verificar modo Kafka: no se pudo confirmar KRaft completamente"
+  fi
+
+  pause
+}
+
 menu_diagnostico() {
   while true; do
     clear
@@ -1105,6 +1424,10 @@ menu_diagnostico() {
     echo -e "  ${GREEN}8)${NC} Prometheus & Grafana (metricas)"
     echo -e "  ${GREEN}9)${NC} MLflow (experimentos y runs)"
     echo -e "  ${GREEN}a)${NC} Airflow (DAGs y ejecuciones)"
+    echo -e "  ${GREEN}b)${NC} Test end-to-end automatico Docker"
+    echo -e "  ${GREEN}c)${NC} Test end-to-end automatico K8s"
+    echo -e "  ${GREEN}d)${NC} Diagnostico deploy-mode cluster"
+    echo -e "  ${GREEN}e)${NC} Verificar versiones del enunciado"
     echo ""
     echo -e "  ${GREEN}0)${NC} Volver al menu principal"
     echo -e "${BOLD}${MAGENTA}============================================${NC}"
@@ -1123,6 +1446,10 @@ menu_diagnostico() {
       8) diag_prometheus ;;
       9) diag_mlflow ;;
       a|A) diag_airflow ;;
+      b|B) diag_test_e2e_docker ;;
+      c|C) diag_test_e2e_k8s ;;
+      d|D) diag_deploy_mode_cluster ;;
+      e|E) diag_versiones ;;
       0) break ;;
       *) warn "Opcion no valida" ;;
     esac
@@ -1132,6 +1459,31 @@ menu_diagnostico() {
 # ============================================================
 #   LOGS
 # ============================================================
+
+logs_spark_worker_driver() {
+  local worker="$1"
+  header "LOGS -- ${worker^^} (DRIVERS)"
+  docker exec "$worker" bash -lc '
+    DRIVER=$(ls -td /opt/spark/work/driver-*/ 2>/dev/null | head -1)
+    if [ -n "$DRIVER" ]; then
+      echo "=== Driver mas reciente: $DRIVER ==="
+      echo "--- stdout ---"
+      cat "$DRIVER/stdout" 2>/dev/null | tail -20
+      echo "--- stderr (ultimas 30 lineas) ---"
+      cat "$DRIVER/stderr" 2>/dev/null | grep -v NativeCodeLoader | grep -v SLF4J | tail -30
+    else
+      echo "No hay drivers en este worker"
+    fi
+  ' 2>/dev/null || warn "No se pudo leer $worker"
+  pause
+}
+
+logs_flask_metrics() {
+  header "FLASK METRICS -- /metrics"
+  curl -s http://localhost:5001/metrics 2>/dev/null | \
+    grep -E "^flight_|^flask_http_request_total|^flask_http_request_duration" || warn "No se pudieron leer metricas Flask"
+  pause
+}
 
 menu_logs() {
   while true; do
@@ -1153,6 +1505,9 @@ menu_logs() {
     echo -e "  ${GREEN}a)${NC}  Prometheus"
     echo -e "  ${GREEN}b)${NC}  Grafana"
     echo -e "  ${GREEN}c)${NC}  Todos los servicios (ultimas 5 lineas c/u)"
+    echo -e "  ${GREEN}d)${NC}  Spark Worker-1 (logs de drivers)"
+    echo -e "  ${GREEN}e)${NC}  Spark Worker-2 (logs de drivers)"
+    echo -e "  ${GREEN}f)${NC}  Flask metricas Prometheus (/metrics)"
     echo ""
     echo -e "  ${GREEN}0)${NC}  Volver"
     echo -e "${BOLD}${YELLOW}============================================${NC}"
@@ -1213,10 +1568,50 @@ menu_logs() {
           docker logs $svc --tail=5 2>&1
         done
         pause ;;
+      d|D)
+        logs_spark_worker_driver "spark-worker-1" ;;
+      e|E)
+        logs_spark_worker_driver "spark-worker-2" ;;
+      f|F)
+        logs_flask_metrics ;;
       0) break ;;
       *) warn "Opcion no valida" ;;
     esac
   done
+}
+
+limpiar_checkpoints_docker() {
+  header "LIMPIAR CHECKPOINTS S3A -- DOCKER"
+  info "Limpiando checkpoints S3A del predictor..."
+  warn "Esto requiere reiniciar el predictor"
+  echo -n "  Confirmas? (s/N): "
+  read confirm
+
+  if [[ "$confirm" =~ ^[sS]$ ]]; then
+    docker compose --profile predictor stop spark-predictor 2>/dev/null || true
+
+    local driver_id
+    driver_id=$(curl -s http://localhost:8080/json/ | python3 -c 'import sys,json; d=json.load(sys.stdin); drivers=[x for x in d.get("activedrivers",[]) if "MakePrediction" in x.get("mainclass","")]; print(drivers[0]["id"] if drivers else "")' 2>/dev/null)
+    if [ -n "$driver_id" ]; then
+      if docker exec spark-master curl -s -X POST "http://spark-master:6066/v1/submissions/kill/$driver_id" >/dev/null 2>&1; then
+        ok "Driver $driver_id eliminado"
+      elif docker exec spark-master python3 -c "import urllib.request; urllib.request.urlopen('http://spark-master:6066/v1/submissions/kill/$driver_id', data=b'')" >/dev/null 2>&1; then
+        ok "Driver $driver_id eliminado"
+      else
+        warn "No se pudo confirmar la eliminacion del driver $driver_id"
+      fi
+    else
+      warn "No hay driver MakePrediction activo"
+    fi
+
+    docker exec minio sh -c "mc alias set local http://localhost:9000 minioadmin minioadmin 2>/dev/null && mc rm --recursive --force local/flight-data/checkpoints/predictor/ 2>/dev/null && echo 'Checkpoints eliminados' || echo 'No habia checkpoints'"
+    docker compose --profile predictor up -d spark-predictor
+    ok "Predictor reiniciado con checkpoints limpios"
+  else
+    info "Operacion cancelada"
+  fi
+
+  pause
 }
 
 # ============================================================
@@ -1251,10 +1646,11 @@ while true; do
   echo -e "  ${GREEN}6)${NC} Ver URLs actuales -- Kubernetes"
   echo -e "  ${GREEN}7)${NC} Apagar cluster GKE (ahorra dinero)"
   echo -e "  ${GREEN}8)${NC} Parar Docker Compose"
+  echo -e "  ${GREEN}9)${NC} Limpiar checkpoints S3A (Docker)"
   echo ""
   echo -e "  ${BOLD}DIAGNOSTICO & LOGS${NC}"
-  echo -e "  ${GREEN}9)${NC}  Diagnostico del sistema"
-  echo -e "  ${GREEN}10)${NC} Ver logs por servicio"
+  echo -e "  ${GREEN}10)${NC} Diagnostico del sistema"
+  echo -e "  ${GREEN}11)${NC} Ver logs por servicio"
   echo ""
   echo -e "  ${GREEN}0)${NC} Salir"
   echo -e "${BOLD}${BLUE}============================================${NC}"
@@ -1271,8 +1667,9 @@ while true; do
     6) show_urls_k8s ;;
     7) apagar_k8s ;;
     8) parar_docker ;;
-    9) menu_diagnostico ;;
-    10) menu_logs ;;
+    9) limpiar_checkpoints_docker ;;
+    10) menu_diagnostico ;;
+    11) menu_logs ;;
     0) echo ""; info "Hasta luego!"; echo ""; break ;;
     *) warn "Opcion no valida" ;;
   esac
