@@ -17,6 +17,9 @@ rules:
 - apiGroups: ["apps"]
   resources: ["deployments"]
   verbs: ["get", "list", "watch", "patch"]
+- apiGroups: ["apps"]
+  resources: ["deployments/scale"]
+  verbs: ["get", "patch", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -45,6 +48,13 @@ spec:
         app: airflow
     spec:
       initContainers:
+      - name: kubectl-install
+        image: bitnami/kubectl:latest
+        imagePullPolicy: IfNotPresent
+        command: ["sh", "-c", "cp /opt/bitnami/kubectl/bin/kubectl /kubectl-bin/kubectl && chmod +x /kubectl-bin/kubectl"]
+        volumeMounts:
+        - name: kubectl-bin
+          mountPath: /kubectl-bin
       - name: airflow-init
         image: apache/airflow:2.10.4
         imagePullPolicy: Always
@@ -54,6 +64,10 @@ spec:
           value: "false"
         - name: AIRFLOW__DATABASE__SQL_ALCHEMY_CONN
           value: "sqlite:////opt/airflow/airflow.db"
+        - name: IN_K8S
+          value: "true"
+        - name: KUBECTL
+          value: "/opt/kubectl-bin/kubectl"
         volumeMounts:
         - name: airflow-db
           mountPath: /opt/airflow
@@ -72,15 +86,23 @@ spec:
           value: "false"
         - name: AIRFLOW__DATABASE__SQL_ALCHEMY_CONN
           value: "sqlite:////opt/airflow/airflow.db"
+        - name: IN_K8S
+          value: "true"
+        - name: KUBECTL
+          value: "/opt/kubectl-bin/kubectl"
         volumeMounts:
         - name: airflow-db
           mountPath: /opt/airflow
         - name: dags
           mountPath: /opt/airflow/dags/retrain_model.py
           subPath: retrain_model.py
+        - name: kubectl-bin
+          mountPath: /opt/kubectl-bin
       serviceAccountName: airflow-sa
       volumes:
       - name: airflow-db
+        emptyDir: {}
+      - name: kubectl-bin
         emptyDir: {}
       - name: dags
         configMap:

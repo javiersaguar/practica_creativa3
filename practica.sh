@@ -270,62 +270,194 @@ PY
 arrancar_k8s() {
   header "ARRANCANDO KUBERNETES GKE"
 
-  info "Autenticando con el cluster..."
-  gcloud container clusters get-credentials $CLUSTER --zone $ZONE
+  cd "$PROJECT_HOME"
+  export USE_GKE_GCLOUD_AUTH_PLUGIN=True
+  export PATH="/usr/local/bin:/tmp:$PATH"
 
-  NODE_COUNT=$(kubectl get nodes --no-headers 2>/dev/null | wc -l)
-  if [ "$NODE_COUNT" -lt "2" ]; then
-    info "Escalando cluster a 2 nodos..."
-    gcloud container clusters resize $CLUSTER --num-nodes=2 --zone $ZONE --quiet
-    info "Esperando nodos Ready (60s)..."
-    sleep 60
-    kubectl wait --for=condition=Ready nodes --all --timeout=120s
+  info "Asegurando kubectl al inicio..."
+  if ! command -v kubectl >/dev/null 2>&1; then
+    KUBECTL_VERSION=$(curl -L -s https://dl.k8s.io/release/stable.txt 2>/dev/null || echo "v1.35.0")
+    curl -fsSL "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" -o /tmp/kubectl || {
+      err "No se pudo descargar kubectl"
+      return 1
+    }
+    chmod +x /tmp/kubectl
+    sudo install -m 755 /tmp/kubectl /usr/local/bin/kubectl 2>/dev/null || export PATH="/tmp:$PATH"
+  fi
+  ok "kubectl: $(command -v kubectl)"
+
+  info "Asegurando gke-gcloud-auth-plugin..."
+  if ! command -v gke-gcloud-auth-plugin >/dev/null 2>&1; then
+    cat > /tmp/gke-gcloud-auth-plugin << 'SHIM'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "--version" ]]; then
+  echo "gke-gcloud-auth-plugin shim 1.0.0"
+  exit 0
+fi
+GCLOUD_BIN="${GCLOUD_BIN:-gcloud}"
+TOKEN="$("$GCLOUD_BIN" auth print-access-token)"
+EXPIRATION="$("$GCLOUD_BIN" config config-helper --format='value(credential.token_expiry)' 2>/dev/null || true)"
+if [[ -n "$EXPIRATION" ]]; then
+  printf '{"kind":"ExecCredential","apiVersion":"client.authentication.k8s.io/v1beta1","status":{"expirationTimestamp":"%s","token":"%s"}}\n' "$EXPIRATION" "$TOKEN"
+else
+  printf '{"kind":"ExecCredential","apiVersion":"client.authentication.k8s.io/v1beta1","status":{"token":"%s"}}\n' "$TOKEN"
+fi
+SHIM
+    chmod +x /tmp/gke-gcloud-auth-plugin
+    sudo install -m 755 /tmp/gke-gcloud-auth-plugin /usr/local/bin/gke-gcloud-auth-plugin 2>/dev/null || export PATH="/tmp:$PATH"
+  fi
+  gke-gcloud-auth-plugin --version >/dev/null 2>&1 \
+    && ok "gke-gcloud-auth-plugin: $(command -v gke-gcloud-auth-plugin)" \
+    || { err "gke-gcloud-auth-plugin no funciona"; return 1; }
+
+  PROJECT_ID=$(gcloud config get-value project 2>/dev/null || true)
+  if [ -z "$PROJECT_ID" ]; then
+    err "gcloud no tiene proyecto configurado"
+    echo "  Ejecuta: gcloud config set project PROJECT_ID"
+    return 1
+  fi
+
+  ACTIVE_ACCOUNT=$(gcloud config get-value account 2>/dev/null || true)
+  USER_ACCOUNT=$(gcloud auth list --format='value(account)' 2>/dev/null | grep -v 'developer.gserviceaccount.com' | grep '@' | head -n 1 || true)
+  if [[ "$ACTIVE_ACCOUNT" == *developer.gserviceaccount.com ]] && [ -n "$USER_ACCOUNT" ]; then
+    info "Cambiando gcloud a cuenta de usuario: $USER_ACCOUNT"
+    gcloud config set account "$USER_ACCOUNT" >/dev/null
+    ACTIVE_ACCOUNT="$USER_ACCOUNT"
+  fi
+  if [[ "$ACTIVE_ACCOUNT" == *developer.gserviceaccount.com ]] || [ -z "$ACTIVE_ACCOUNT" ]; then
+    err "Solo hay credenciales de service account con scopes insuficientes"
+    echo "  En la consola GCloud abre:"
+    echo "  https://console.cloud.google.com/kubernetes/clusters/details/$ZONE/$CLUSTER/details?project=$PROJECT_ID"
+    echo "  Luego en esta VM ejecuta una sola vez:"
+    echo "  gcloud auth login --no-launch-browser"
+    echo "  gcloud config set account TU_USUARIO"
+    echo "  gcloud container clusters get-credentials $CLUSTER --zone $ZONE --project $PROJECT_ID"
+    return 1
+  fi
+  ok "gcloud activo: $ACTIVE_ACCOUNT / $PROJECT_ID"
+
+  info "Autenticando con el cluster..."
+  gcloud container clusters get-credentials "$CLUSTER" --zone "$ZONE" --project "$PROJECT_ID" || {
+    err "No se pudo generar kubeconfig para $CLUSTER"
+    return 1
+  }
+  kubectl cluster-info >/dev/null || {
+    err "kubectl no puede conectar con el API server"
+    return 1
+  }
+  ok "Cluster GKE accesible"
+
+  kubectl scale deployment/spark-predictor --replicas=0 2>/dev/null || true
+
+  TARGET_NODES="${K8S_NODE_COUNT:-2}"
+  NODE_COUNT=$(kubectl get nodes --no-headers 2>/dev/null | sed '/^$/d' | wc -l)
+  if [ "$NODE_COUNT" -lt "$TARGET_NODES" ]; then
+    info "Escalando cluster a $TARGET_NODES nodos..."
+    if ! gcloud container clusters resize "$CLUSTER" --num-nodes="$TARGET_NODES" --zone "$ZONE" --project "$PROJECT_ID" --quiet; then
+      if [ "$TARGET_NODES" -gt "1" ]; then
+        warn "No hay cuota para $TARGET_NODES nodos; intentando fallback a 1 nodo"
+        TARGET_NODES=1
+        gcloud container clusters resize "$CLUSTER" --num-nodes="$TARGET_NODES" --zone "$ZONE" --project "$PROJECT_ID" --quiet || {
+          err "No se pudo escalar el cluster ni siquiera a 1 nodo"
+          echo "  Abre:"
+          echo "  https://console.cloud.google.com/kubernetes/clusters/details/$ZONE/$CLUSTER/nodes?project=$PROJECT_ID"
+          echo "  O libera/aumenta cuota regional SSD_TOTAL_GB:"
+          echo "  https://console.cloud.google.com/iam-admin/quotas?usage=USED&project=$PROJECT_ID"
+          echo "  Despues relanza: ./practica.sh -> opcion 2"
+          return 1
+        }
+      else
+        err "No se pudo escalar el cluster"
+        echo "  Abre:"
+        echo "  https://console.cloud.google.com/kubernetes/clusters/details/$ZONE/$CLUSTER/nodes?project=$PROJECT_ID"
+        echo "  O libera/aumenta cuota regional SSD_TOTAL_GB:"
+        echo "  https://console.cloud.google.com/iam-admin/quotas?usage=USED&project=$PROJECT_ID"
+        echo "  Despues relanza: ./practica.sh -> opcion 2"
+        return 1
+      fi
+    fi
+    info "Esperando a que aparezcan $TARGET_NODES nodos..."
+    for _ in {1..60}; do
+      NODE_COUNT=$(kubectl get nodes --no-headers 2>/dev/null | sed '/^$/d' | wc -l)
+      [ "$NODE_COUNT" -ge "$TARGET_NODES" ] && break
+      sleep 10
+    done
+  fi
+  kubectl wait --for=condition=Ready nodes --all --timeout=300s
+  NODE_COUNT=$(kubectl get nodes --no-headers 2>/dev/null | sed '/^$/d' | wc -l)
+  ok "Cluster con $NODE_COUNT nodos Ready"
+
+  AR_LOCATION="${ZONE%-*}"
+  REGISTRY="${AR_LOCATION}-docker.pkg.dev/${PROJECT_ID}/practica"
+  if command -v docker >/dev/null 2>&1; then
+    info "Publicando imagenes K8s en Artifact Registry..."
+    gcloud auth configure-docker "${AR_LOCATION}-docker.pkg.dev" --quiet >/dev/null
+    docker build \
+      -t "$REGISTRY/spark-master:latest" \
+      -t "$REGISTRY/spark-worker:latest" \
+      -t "$REGISTRY/spark-predictor:latest" \
+      "$PROJECT_HOME/docker/spark" \
+      && docker push "$REGISTRY/spark-master:latest" \
+      && docker push "$REGISTRY/spark-worker:latest" \
+      && docker push "$REGISTRY/spark-predictor:latest" \
+      && ok "Imagenes Spark publicadas con el JAR actual" \
+      || { err "Error publicando imagenes Spark"; return 1; }
+
+    docker build -t "$REGISTRY/kafka:latest" "$PROJECT_HOME/docker/kafka" \
+      && docker push "$REGISTRY/kafka:latest" \
+      && ok "Imagen Kafka publicada" \
+      || { err "Error publicando imagen Kafka"; return 1; }
+
+    docker build -f "$PROJECT_HOME/docker/flask/Dockerfile" -t "$REGISTRY/flask:latest" "$PROJECT_HOME" \
+      && docker push "$REGISTRY/flask:latest" \
+      && ok "Imagen Flask publicada" \
+      || { err "Error publicando imagen Flask"; return 1; }
   else
-    ok "Cluster ya tiene $NODE_COUNT nodos activos"
+    warn "docker no esta disponible; se usaran las imagenes ya publicadas en $REGISTRY"
   fi
 
   info "Creando ConfigMap del DAG de Airflow..."
   kubectl create configmap airflow-dags \
-    --from-file=retrain_model.py=$PROJECT_HOME/docker/airflow/dags/retrain_model.py \
+    --from-file=retrain_model.py="$PROJECT_HOME/docker/airflow/dags/retrain_model.py" \
     --dry-run=client -o yaml | kubectl apply -f - 2>/dev/null \
-    && ok "ConfigMap airflow-dags creado" || warn "Error creando ConfigMap"
+    && ok "ConfigMap airflow-dags creado" || { err "Error creando ConfigMap"; return 1; }
 
+  info "Aplicando manifests base..."
+  for manifest in mongo cassandra minio kafka spark flask prometheus grafana mlflow airflow; do
+    kubectl apply -f "$MANIFESTS/$manifest.yaml" || return 1
+  done
 
-  info "Aplicando manifests..."
-  kubectl apply -f $MANIFESTS/mongo.yaml
-  kubectl apply -f $MANIFESTS/cassandra.yaml
-  kubectl apply -f $MANIFESTS/minio.yaml
-  kubectl apply -f $MANIFESTS/kafka.yaml
-  kubectl apply -f $MANIFESTS/spark.yaml
-  kubectl apply -f $MANIFESTS/flask.yaml
-  kubectl apply -f $MANIFESTS/prometheus.yaml
-  kubectl apply -f $MANIFESTS/grafana.yaml
-  kubectl apply -f $MANIFESTS/mlflow.yaml
-  kubectl apply -f $MANIFESTS/airflow.yaml
-  kubectl apply -f $MANIFESTS/spark-predictor-patch.yaml
+  info "Esperando deployments base..."
+  kubectl rollout status deployment/mongo --timeout=180s || true
+  kubectl rollout status deployment/minio --timeout=180s || true
+  kubectl rollout status deployment/kafka --timeout=240s || true
+  kubectl rollout status deployment/spark-master --timeout=240s || true
+  kubectl rollout status deployment/spark-worker --timeout=240s || true
+  kubectl rollout status deployment/mlflow --timeout=180s || true
+  kubectl rollout status deployment/flask --timeout=180s || true
+  kubectl rollout status deployment/airflow --timeout=240s || true
 
-  info "Esperando pods criticos (60s)..."
-  sleep 30
-  kubectl wait --for=condition=Ready pod -l app=mongo --timeout=120s 2>/dev/null || true
-  kubectl wait --for=condition=Ready pod -l app=kafka --timeout=120s 2>/dev/null || true
-  kubectl wait --for=condition=Ready pod -l app=flask --timeout=120s 2>/dev/null || true
-
-  info "Configurando MinIO y subiendo modelos..."
+  info "Configurando MinIO y subiendo datos..."
+  kubectl wait --for=condition=Ready pod -l app=minio --timeout=180s
   MINIO_POD=$(kubectl get pod -l app=minio -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-  if [ -n "$MINIO_POD" ]; then
-    kubectl exec $MINIO_POD -- sh -c \
-      "mc alias set local http://localhost:9000 minioadmin minioadmin && mc mb local/flight-data 2>/dev/null || true" 2>/dev/null || true
-    kubectl exec $MINIO_POD -- mc alias set local http://localhost:9000 minioadmin minioadmin 2>/dev/null
-    kubectl exec $MINIO_POD -- mc mb local/flight-data 2>/dev/null || true
-    find "$PROJECT_HOME/models" -type f | while read f; do
-      REL="${f#$PROJECT_HOME/models/}"
-      cat "$f" | kubectl exec -i $MINIO_POD -- mc pipe "local/flight-data/models/$REL" 2>/dev/null
-    done
-    ok "MinIO configurado y modelos subidos"
-  fi
+  kubectl exec "$MINIO_POD" -- sh -c \
+    "mc alias set local http://localhost:9000 minioadmin minioadmin >/dev/null && mc mb -p local/flight-data 2>/dev/null || true"
+  kubectl exec -i "$MINIO_POD" -- sh -c \
+    "mc alias set local http://localhost:9000 minioadmin minioadmin >/dev/null && mc pipe local/flight-data/data/simple_flight_delay_features.jsonl.bz2" \
+    < "$PROJECT_HOME/data/simple_flight_delay_features.jsonl.bz2"
+  find "$PROJECT_HOME/models" -type f | while IFS= read -r f; do
+    REL="${f#$PROJECT_HOME/models/}"
+    kubectl exec -i "$MINIO_POD" -- sh -c \
+      "mc alias set local http://localhost:9000 minioadmin minioadmin >/dev/null && mc pipe \"local/flight-data/models/$REL\"" \
+      < "$f" >/dev/null 2>&1 || true
+  done
+  kubectl exec "$MINIO_POD" -- sh -c \
+    "mc alias set local http://localhost:9000 minioadmin minioadmin >/dev/null && mc rm --recursive --force local/flight-data/checkpoints/predictor 2>/dev/null || true"
+  ok "MinIO listo con datos de entrenamiento"
 
   info "Esperando Cassandra lista..."
-  kubectl wait --for=condition=Ready pod -l app=cassandra --timeout=180s 2>/dev/null || true
+  kubectl wait --for=condition=Ready pod -l app=cassandra --timeout=240s
   sleep 10
 
   info "Creando keyspace y tablas en Cassandra..."
@@ -348,7 +480,8 @@ CREATE TABLE IF NOT EXISTS agile_data_science.flight_delay_classification_respon
   carrier TEXT,
   distance DOUBLE,
   route TEXT,
-  prediction DOUBLE);" 2>/dev/null && ok "Keyspace y tablas creados" || warn "Error creando tablas Cassandra"
+  prediction DOUBLE);" \
+    && ok "Keyspace y tablas creados" || { err "Error creando tablas Cassandra"; return 1; }
 
   info "Importando distancias en Cassandra..."
   python3 << 'PYEOF'
@@ -365,65 +498,230 @@ with open('/tmp/distances_k8s.cql', 'w') as f:
     f.write('\n'.join(lines))
 print(f'Generadas {len(lines)} sentencias')
 PYEOF
-  kubectl cp /tmp/distances_k8s.cql \
-    $(kubectl get pod -l app=cassandra -o jsonpath='{.items[0].metadata.name}'):/tmp/distances.cql 2>/dev/null
-  kubectl exec deployment/cassandra -- cqlsh -f /tmp/distances.cql 2>/dev/null \
-    && ok "Distancias importadas" || warn "Error importando distancias"
+  kubectl exec -i deployment/cassandra -- cqlsh < /tmp/distances_k8s.cql \
+    && ok "Distancias importadas" || { err "Error importando distancias"; return 1; }
 
-  info "Reiniciando Kafka y Flask para asegurar conexion..."
-  kubectl rollout restart deployment/kafka 2>/dev/null
-  sleep 15
-  kubectl rollout restart deployment/flask 2>/dev/null
-  sleep 15
-  kubectl rollout restart deployment/spark-predictor 2>/dev/null
+  info "Verificando JAR en Spark..."
+  kubectl wait --for=condition=Ready pod -l app=spark-master --timeout=180s
+  SPARK_POD=$(kubectl get pod -l app=spark-master -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+  kubectl exec "$SPARK_POD" -- test -f /app/jars/flight_prediction_2.13-0.1.jar \
+    && ok "JAR Scala presente en /app/jars" \
+    || { err "No se encuentra el JAR en /app/jars"; return 1; }
 
-  info "Verificando que el predictor K8s arranca correctamente..."
-  sleep 60
+  info "Deteniendo drivers Spark activos antes del bootstrap..."
+  kubectl exec -i "$SPARK_POD" -- python3 <<'PYKILL'
+import json, time, urllib.request
+
+MASTER_JSON = "http://spark-master:8080/json/"
+KILL_URL = "http://spark-master:6066/v1/submissions/kill/"
+
+def get_master():
+    with urllib.request.urlopen(MASTER_JSON, timeout=10) as r:
+        return json.load(r)
+
+def kill_driver(driver_id):
+    req = urllib.request.Request(KILL_URL + driver_id, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            print("kill", driver_id, r.read().decode("utf-8", "ignore"))
+    except Exception as exc:
+        print("kill failed", driver_id, exc)
+
+for d in get_master().get("activedrivers", []):
+    mainclass = d.get("mainclass", "")
+    if "MakePrediction" in mainclass or "TrainModel" in mainclass:
+        print("Stopping", d["id"], mainclass, d.get("state"))
+        kill_driver(d["id"])
+
+for _ in range(30):
+    time.sleep(2)
+    busy = [
+        d for d in get_master().get("activedrivers", [])
+        if "MakePrediction" in d.get("mainclass", "") or "TrainModel" in d.get("mainclass", "")
+    ]
+    if not busy:
+        print("Spark drivers cleared")
+        break
+    print("Waiting:", [(d.get("id"), d.get("state")) for d in busy])
+else:
+    raise RuntimeError("Spark drivers did not stop in time")
+PYKILL
+
+  info "Creando tabla Iceberg en MinIO..."
+  cat > /tmp/LoadIcebergK8s.java << 'JAVA'
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.SparkSession;
+
+public class LoadIcebergK8s {
+  public static void main(String[] args) throws Exception {
+    SparkSession spark = SparkSession.builder()
+      .appName("load-iceberg-k8s")
+      .config("spark.sql.extensions", "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions")
+      .config("spark.sql.catalog.minio", "org.apache.iceberg.spark.SparkCatalog")
+      .config("spark.sql.catalog.minio.type", "hadoop")
+      .config("spark.sql.catalog.minio.warehouse", "s3a://flight-data/warehouse")
+      .config("spark.hadoop.fs.s3a.endpoint", "http://minio:9000")
+      .config("spark.hadoop.fs.s3a.access.key", "minioadmin")
+      .config("spark.hadoop.fs.s3a.secret.key", "minioadmin")
+      .config("spark.hadoop.fs.s3a.path.style.access", "true")
+      .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
+      .config("spark.hadoop.fs.s3a.connection.ssl.enabled", "false")
+      .getOrCreate();
+
+    Dataset<Row> df = spark.read().json("s3a://flight-data/data/simple_flight_delay_features.jsonl.bz2");
+    spark.sql("CREATE NAMESPACE IF NOT EXISTS minio.flights");
+    spark.sql("DROP TABLE IF EXISTS minio.flights.training_data");
+    df.writeTo("minio.flights.training_data").create();
+    System.out.println("Registros Iceberg: " + spark.table("minio.flights.training_data").count());
+    spark.stop();
+  }
+}
+JAVA
+  kubectl cp /tmp/LoadIcebergK8s.java "$SPARK_POD":/tmp/LoadIcebergK8s.java
+  kubectl exec "$SPARK_POD" -- bash -lc \
+    "rm -rf /tmp/load_iceberg_classes /tmp/load-iceberg-k8s.jar && mkdir -p /tmp/load_iceberg_classes && javac -cp '/opt/spark/jars/*' -d /tmp/load_iceberg_classes /tmp/LoadIcebergK8s.java && jar cf /tmp/load-iceberg-k8s.jar -C /tmp/load_iceberg_classes ." \
+    || { err "Error compilando helper Iceberg"; return 1; }
+  kubectl cp "$SPARK_POD":/tmp/load-iceberg-k8s.jar /tmp/load-iceberg-k8s.jar \
+    || { err "Error copiando helper Iceberg desde spark-master"; return 1; }
+  kubectl cp /tmp/load-iceberg-k8s.jar "$SPARK_POD":/tmp/load-iceberg-k8s.jar \
+    || { err "Error copiando helper Iceberg a spark-master"; return 1; }
+  for WORKER_POD in $(kubectl get pod -l app=spark-worker -o jsonpath='{range .items[*]}{.metadata.name}{" "}{end}' 2>/dev/null); do
+    kubectl cp /tmp/load-iceberg-k8s.jar "$WORKER_POD":/tmp/load-iceberg-k8s.jar
+  done
+  kubectl exec "$SPARK_POD" -- /opt/spark/bin/spark-submit \
+    --master spark://spark-master:7077 \
+    --deploy-mode cluster \
+    --conf spark.standalone.submit.waitAppCompletion=true \
+    --conf spark.driver.cores=1 \
+    --conf spark.driver.memory=1g \
+    --conf spark.executor.instances=1 \
+    --conf spark.executor.cores=1 \
+    --conf spark.executor.memory=1g \
+    --conf spark.cores.max=2 \
+    --conf spark.jars.ivy=/home/spark/.ivy2 \
+    --conf spark.hadoop.fs.s3a.endpoint=http://minio:9000 \
+    --conf spark.hadoop.fs.s3a.access.key=minioadmin \
+    --conf spark.hadoop.fs.s3a.secret.key=minioadmin \
+    --conf spark.hadoop.fs.s3a.path.style.access=true \
+    --conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem \
+    --conf spark.hadoop.fs.s3a.connection.ssl.enabled=false \
+    --conf spark.hadoop.fs.s3a.aws.credentials.provider=org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider \
+    --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions \
+    --conf spark.sql.catalog.minio=org.apache.iceberg.spark.SparkCatalog \
+    --conf spark.sql.catalog.minio.type=hadoop \
+    --conf spark.sql.catalog.minio.warehouse=s3a://flight-data/warehouse \
+    --class LoadIcebergK8s \
+    file:///tmp/load-iceberg-k8s.jar \
+    && ok "Tabla Iceberg creada" || { err "Error creando tabla Iceberg"; return 1; }
+
+  info "Entrenando modelo TrainModel en K8s (deploy-mode cluster)..."
+  kubectl exec "$SPARK_POD" -- bash -lc '
+MLFLOW_TRACKING_URI=http://mlflow:5000 \
+MODEL_BASE_PATH=s3a://flight-data/models \
+TRAINING_TABLE=minio.flights.training_data \
+S3_ENDPOINT=http://minio:9000 \
+AWS_ACCESS_KEY_ID=minioadmin \
+AWS_SECRET_ACCESS_KEY=minioadmin \
+/opt/spark/bin/spark-submit \
+  --master spark://spark-master:7077 \
+  --deploy-mode cluster \
+  --class es.upm.dit.ging.predictor.TrainModel \
+  --conf spark.standalone.submit.waitAppCompletion=true \
+  --conf spark.driver.cores=1 \
+  --conf spark.driver.memory=1g \
+  --conf spark.executor.instances=1 \
+  --conf spark.executor.cores=1 \
+  --conf spark.executor.memory=1g \
+  --conf spark.cores.max=2 \
+  --conf spark.jars.ivy=/home/spark/.ivy2 \
+  --conf spark.driverEnv.MLFLOW_TRACKING_URI=http://mlflow:5000 \
+  --conf spark.driverEnv.MODEL_BASE_PATH=s3a://flight-data/models \
+  --conf spark.driverEnv.TRAINING_TABLE=minio.flights.training_data \
+  --conf spark.driverEnv.S3_ENDPOINT=http://minio:9000 \
+  --conf spark.driverEnv.AWS_ACCESS_KEY_ID=minioadmin \
+  --conf spark.driverEnv.AWS_SECRET_ACCESS_KEY=minioadmin \
+  --conf "spark.driver.extraJavaOptions=-DMLFLOW_TRACKING_URI=http://mlflow:5000 -DTRAINING_TABLE=minio.flights.training_data -DMODEL_BASE_PATH=s3a://flight-data/models -DS3_ENDPOINT=http://minio:9000 -DAWS_ACCESS_KEY_ID=minioadmin -DAWS_SECRET_ACCESS_KEY=minioadmin" \
+  --conf spark.hadoop.fs.s3a.endpoint=http://minio:9000 \
+  --conf spark.hadoop.fs.s3a.access.key=minioadmin \
+  --conf spark.hadoop.fs.s3a.secret.key=minioadmin \
+  --conf spark.hadoop.fs.s3a.path.style.access=true \
+  --conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem \
+  --conf spark.hadoop.fs.s3a.connection.ssl.enabled=false \
+  --conf spark.hadoop.fs.s3a.aws.credentials.provider=org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider \
+  --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions \
+  --conf spark.sql.catalog.minio=org.apache.iceberg.spark.SparkCatalog \
+  --conf spark.sql.catalog.minio.type=hadoop \
+  --conf spark.sql.catalog.minio.warehouse=s3a://flight-data/warehouse \
+  file:///app/jars/flight_prediction_2.13-0.1.jar
+' \
+    && ok "Modelo entrenado y registrado en MLflow" || { err "Error entrenando modelo"; return 1; }
+
+  info "Arrancando Spark predictor en K8s..."
+  kubectl scale deployment/spark-predictor --replicas=0 2>/dev/null || true
+  kubectl exec "$SPARK_POD" -- python3 <<'PY'
+import json
+import time
+import urllib.request
+
+MASTER_JSON = "http://spark-master:8080/json/"
+KILL_URL = "http://spark-master:6066/v1/submissions/kill/"
+
+def get_master():
+    with urllib.request.urlopen(MASTER_JSON, timeout=10) as r:
+        return json.load(r)
+
+def kill_driver(driver_id):
+    req = urllib.request.Request(KILL_URL + driver_id, method="POST")
+    with urllib.request.urlopen(req, timeout=10) as r:
+        print(r.read().decode("utf-8", "ignore"))
+
+for d in get_master().get("activedrivers", []):
+    if "MakePrediction" in d.get("mainclass", ""):
+        print("Stopping old predictor driver", d["id"], d.get("state"))
+        kill_driver(d["id"])
+
+for _ in range(30):
+    time.sleep(2)
+    active = [
+        d for d in get_master().get("activedrivers", [])
+        if "MakePrediction" in d.get("mainclass", "")
+    ]
+    if not active:
+        print("Predictor drivers cleared")
+        break
+    print("Waiting:", [(d.get("id"), d.get("state")) for d in active])
+else:
+    raise RuntimeError("Predictor drivers did not stop in time")
+PY
+  kubectl apply -f "$MANIFESTS/spark-predictor-patch.yaml"
+  kubectl scale deployment/spark-predictor --replicas=1
+  kubectl rollout status deployment/spark-predictor --timeout=240s || true
+  sleep 30
   PREDICTOR_POD=$(kubectl get pod -l app=spark-predictor --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-  if [ -n "$PREDICTOR_POD" ]; then
-    ASSERT_ERR=$(kubectl logs $PREDICTOR_POD 2>/dev/null | grep -c "AssertionError\|Decision Tree load failed" 2>/dev/null)
-    if [ "$ASSERT_ERR" -gt "0" ]; then
-      warn "Modelos incompatibles detectados - lanzando reentrenamiento automatico..."
-      SPARK_POD=$(kubectl get pod -l app=spark-master --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-      AIRFLOW_POD=$(kubectl get pod -l app=airflow --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-      kubectl exec $AIRFLOW_POD -- bash -c "nohup airflow scheduler >> /tmp/scheduler.log 2>&1 &" 2>/dev/null
-      sleep 5
-      kubectl exec $AIRFLOW_POD -- airflow dags trigger retrain_flight_delay_model 2>/dev/null
-      ok "Reentrenamiento disparado - el predictor estara listo en ~10 min"
-    else
-      ok "Predictor K8s arrancado correctamente"
-    fi
+  if [ -z "$PREDICTOR_POD" ]; then
+    err "spark-predictor no esta Running"
+    kubectl get pods -o wide
+    return 1
+  fi
+  ASSERT_ERR=$(kubectl logs "$PREDICTOR_POD" --tail=200 2>/dev/null | grep -c "AssertionError\|Decision Tree load failed\|Exception" 2>/dev/null || true)
+  if [ "$ASSERT_ERR" -gt "0" ]; then
+    warn "El predictor tiene errores en logs recientes"
+    kubectl logs "$PREDICTOR_POD" --tail=120
+  else
+    ok "Predictor K8s arrancado correctamente"
   fi
 
-  info "Descargando kubectl binary en la VM..."
-  if [ ! -f /tmp/kubectl ]; then
-    curl -sL "https://dl.k8s.io/release/v1.29.0/bin/linux/amd64/kubectl" -o /tmp/kubectl
-    chmod +x /tmp/kubectl
-  fi
-  ok "kubectl binary listo en /tmp/kubectl"
-
-  info "Esperando pods Airflow y Spark Running..."
-  kubectl wait --for=condition=Ready pod -l app=airflow --timeout=180s 2>/dev/null || true
-  kubectl wait --for=condition=Ready pod -l app=spark-master --timeout=120s 2>/dev/null || true
-  sleep 10
-
+  info "Configurando Airflow (kubectl + DAG unpause)..."
   AIRFLOW_POD=$(kubectl get pod -l app=airflow --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-  SPARK_POD=$(kubectl get pod -l app=spark-master --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-
   if [ -n "$AIRFLOW_POD" ]; then
-    info "Configurando Airflow (kubectl + scheduler + DAG unpause)..."
-    kubectl cp /tmp/kubectl $AIRFLOW_POD:/tmp/kubectl 2>/dev/null
-    kubectl exec $AIRFLOW_POD -- chmod +x /tmp/kubectl 2>/dev/null
-    kubectl exec $AIRFLOW_POD -- bash -c "nohup airflow scheduler >> /tmp/scheduler.log 2>&1 &" 2>/dev/null
-    sleep 5
-    kubectl exec $AIRFLOW_POD -- airflow dags unpause retrain_flight_delay_model 2>/dev/null || true
+    KUBECTL_BIN=$(command -v kubectl)
+    kubectl cp "$KUBECTL_BIN" "$AIRFLOW_POD":/tmp/kubectl 2>/dev/null || true
+    kubectl exec "$AIRFLOW_POD" -- chmod +x /tmp/kubectl 2>/dev/null || true
+    kubectl exec "$AIRFLOW_POD" -- airflow dags unpause retrain_flight_delay_model 2>/dev/null || true
     ok "Airflow configurado"
-  fi
-
-  if [ -n "$SPARK_POD" ]; then
-    kubectl exec $SPARK_POD -- test -f /app/jars/flight_prediction_2.13-0.1.jar 2>/dev/null \
-      && ok "spark-master preparado con JAR Scala" \
-      || warn "No se encuentra el JAR en /app/jars dentro de spark-master"
+  else
+    warn "Airflow no esta Running; revisa kubectl get pods"
   fi
 
   echo ""

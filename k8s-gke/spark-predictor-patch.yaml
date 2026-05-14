@@ -29,8 +29,6 @@ spec:
         - "--supervise"
         - "--class"
         - "es.upm.dit.ging.predictor.MakePrediction"
-        - "--packages"
-        - "org.apache.spark:spark-sql-kafka-0-10_2.13:4.1.1,org.mongodb.spark:mongo-spark-connector_2.13:10.4.1,com.datastax.spark:spark-cassandra-connector_2.13:3.5.1,org.apache.hadoop:hadoop-aws:3.4.2,com.amazonaws:aws-java-sdk-bundle:1.12.367"
         - "--conf"
         - "spark.cassandra.connection.host=cassandra"
         - "--conf"
@@ -38,11 +36,17 @@ spec:
         - "--conf"
         - "spark.standalone.submit.waitAppCompletion=true"
         - "--conf"
+        - "spark.driver.cores=1"
+        - "--conf"
         - "spark.driver.memory=1g"
         - "--conf"
         - "spark.executor.memory=1g"
         - "--conf"
         - "spark.executor.cores=1"
+        - "--conf"
+        - "spark.executor.instances=1"
+        - "--conf"
+        - "spark.cores.max=2"
         - "--conf"
         - "spark.driverEnv.MODEL_BASE_PATH=s3a://flight-data/models"
         - "--conf"
@@ -60,6 +64,8 @@ spec:
         - "--conf"
         - "spark.driverEnv.CASSANDRA_HOST=cassandra"
         - "--conf"
+        - "spark.driver.extraJavaOptions=-DKAFKA_BOOTSTRAP_SERVERS=kafka:9092 -DMONGO_URI=mongodb://mongo:27017 -DCASSANDRA_HOST=cassandra -DMODEL_BASE_PATH=s3a://flight-data/models -DCHECKPOINT_BASE_PATH=s3a://flight-data/checkpoints/predictor -DS3_ENDPOINT=http://minio:9000 -DAWS_ACCESS_KEY_ID=minioadmin -DAWS_SECRET_ACCESS_KEY=minioadmin"
+        - "--conf"
         - "spark.hadoop.fs.s3a.endpoint=http://minio:9000"
         - "--conf"
         - "spark.hadoop.fs.s3a.access.key=minioadmin"
@@ -73,7 +79,7 @@ spec:
         - "spark.hadoop.fs.s3a.connection.ssl.enabled=false"
         - "--conf"
         - "spark.hadoop.fs.s3a.aws.credentials.provider=org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider"
-        - "local:///app/jars/flight_prediction_2.13-0.1.jar"
+        - "file:///app/jars/flight_prediction_2.13-0.1.jar"
         env:
         - name: PROJECT_HOME
           value: "/app"
@@ -95,6 +101,8 @@ spec:
           value: "cassandra"
         - name: SPARK_USER
           value: "spark"
+        - name: HOME
+          value: "/home/spark"
         - name: IVY_HOME
           value: "/home/spark/.ivy2"
 ---
