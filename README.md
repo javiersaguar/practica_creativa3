@@ -13,9 +13,9 @@ Sistema Big Data completo para entrenar y servir predicciones de retraso de vuel
 
 - Iria Lozano Carrasco — <irialozanocarrasco26@gmail.com> — ETSIT UPM
 - Javier Saguar — <javisaguarantona@gmail.com> — ETSIT UPM
-- Asignatura: Gestión de Infraestructuras y Servicios de Datos (GISD) / Big Data
+- Asignatura: Ingeniería Big Data en la Nube (GISD)
 - Curso: 2025-2026
-- Repositorio: <https://github.com/javiersaguar/practica_creativa2>
+- Repositorio: <https://github.com/Big-Data-ETSIT/practica_creativa>
 
 ## ✅ Requisitos Cumplidos
 
