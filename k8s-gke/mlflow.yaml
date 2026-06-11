@@ -1,14 +1,17 @@
+# Volumen persistente para la base de datos y los artefactos locales de MLflow.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: mlflow-pvc
 spec:
+  # Solo un nodo puede montar este disco en escritura simultaneamente.
   accessModes:
     - ReadWriteOnce
   resources:
     requests:
       storage: 2Gi
 ---
+# Deployment del servidor de seguimiento de experimentos MLflow.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -27,12 +30,14 @@ spec:
       - name: mlflow
         image: ghcr.io/mlflow/mlflow:v2.19.0
         imagePullPolicy: Always
+        # SQLite almacena metadatos; /mlflow/artifacts guarda artefactos en el mismo PVC.
         command: ["mlflow", "server", "--host", "0.0.0.0", "--port", "5000",
                   "--backend-store-uri", "sqlite:////mlflow/mlflow.db",
                   "--default-artifact-root", "/mlflow/artifacts"]
         ports:
         - containerPort: 5000
         volumeMounts:
+        # El montaje hace persistentes tanto mlflow.db como los artefactos.
         - name: mlflow-storage
           mountPath: /mlflow
       volumes:
@@ -40,6 +45,7 @@ spec:
         persistentVolumeClaim:
           claimName: mlflow-pvc
 ---
+# Service NodePort para acceso interno en mlflow:5000 y externo por 30502.
 apiVersion: v1
 kind: Service
 metadata:

@@ -1,26 +1,33 @@
+# Identidad que usara el pod de Airflow para autenticarse ante la API de Kubernetes.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: airflow-sa
 ---
+# Permisos RBAC limitados que permiten al DAG inspeccionar pods y controlar deployments Spark.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: airflow-spark-runner
 rules:
+# Permite consultar el estado y los logs de los pods.
 - apiGroups: [""]
   resources: ["pods", "pods/log"]
   verbs: ["get", "list", "watch"]
+# pods/exec usa el verbo create porque abre una nueva sesion remota en el pod.
 - apiGroups: [""]
   resources: ["pods/exec"]
   verbs: ["create", "get"]
+# Permite consultar y parchear deployments, por ejemplo el predictor Spark.
 - apiGroups: ["apps"]
   resources: ["deployments"]
   verbs: ["get", "list", "watch", "patch"]
+# Subrecurso necesario para cambiar el numero de replicas de un Deployment.
 - apiGroups: ["apps"]
   resources: ["deployments/scale"]
   verbs: ["get", "patch", "update"]
 ---
+# Asocia los permisos anteriores con la ServiceAccount utilizada por Airflow.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
@@ -33,6 +40,7 @@ roleRef:
   name: airflow-spark-runner
   apiGroup: rbac.authorization.k8s.io
 ---
+# Deployment que ejecuta conjuntamente el scheduler y el servidor web de Airflow.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -47,7 +55,9 @@ spec:
       labels:
         app: airflow
     spec:
+      # Los initContainers terminan antes de arrancar el contenedor principal.
       initContainers:
+      # Copia kubectl a un volumen compartido para que el DAG pueda controlar recursos K8s.
       - name: kubectl-install
         image: bitnami/kubectl:latest
         imagePullPolicy: IfNotPresent
@@ -55,6 +65,7 @@ spec:
         volumeMounts:
         - name: kubectl-bin
           mountPath: /kubectl-bin
+      # Inicializa la base de datos de Airflow y crea el usuario administrador.
       - name: airflow-init
         image: apache/airflow:2.10.4
         imagePullPolicy: Always
@@ -63,6 +74,7 @@ spec:
         - name: AIRFLOW__CORE__LOAD_EXAMPLES
           value: "false"
         - name: AIRFLOW__DATABASE__SQL_ALCHEMY_CONN
+          # SQLite se guarda en el volumen compartido montado en /opt/airflow.
           value: "sqlite:////opt/airflow/airflow.db"
         - name: IN_K8S
           value: "true"
@@ -72,8 +84,10 @@ spec:
         - name: airflow-db
           mountPath: /opt/airflow
         - name: dags
+          # subPath monta solo el fichero del DAG, no todo el ConfigMap como directorio.
           mountPath: /opt/airflow/dags/retrain_model.py
           subPath: retrain_model.py
+      # Contenedor principal con scheduler en segundo plano y webserver en primer plano.
       containers:
       - name: airflow
         image: apache/airflow:2.10.4
@@ -98,16 +112,21 @@ spec:
           subPath: retrain_model.py
         - name: kubectl-bin
           mountPath: /opt/kubectl-bin
+      # Hace que el pod use los permisos concedidos por el RoleBinding.
       serviceAccountName: airflow-sa
       volumes:
+      # emptyDir vive mientras exista el pod; al recrearlo se pierde la BD SQLite.
       - name: airflow-db
         emptyDir: {}
+      # Volumen temporal compartido por el instalador de kubectl y Airflow.
       - name: kubectl-bin
         emptyDir: {}
+      # El DAG se inyecta desde el ConfigMap creado por practica.sh.
       - name: dags
         configMap:
           name: airflow-dags
 ---
+# Service NodePort que publica la interfaz web de Airflow fuera del cluster.
 apiVersion: v1
 kind: Service
 metadata:
@@ -119,4 +138,5 @@ spec:
   ports:
   - port: 8080
     targetPort: 8080
+    # Puerto fijo accesible mediante la IP externa de un nodo GKE.
     nodePort: 30808

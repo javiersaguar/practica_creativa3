@@ -1,109 +1,147 @@
+# Servicios que forman el pipeline Big Data en el entorno Docker.
 services:
 
+  # MongoDB almacena las predicciones generadas por Spark para su consulta.
   mongo:
+    # Imagen oficial y nombre fijo para acceder al servicio como "mongo".
     image: mongo:7.0.17
     container_name: mongo
+    # Expone MongoDB en el mismo puerto del host y del contenedor.
     ports:
       - "27017:27017"
+    # Conserva la base de datos aunque se recree el contenedor.
     volumes:
       - mongo_data:/data/db
+    # Todos los servicios se comunican por la red interna practica_net.
     networks:
       - practica_net
 
+  # Cassandra guarda distancias entre aeropuertos y respuestas de prediccion.
   cassandra:
     image: cassandra:4.1
     container_name: cassandra
+    # Puerto nativo CQL usado por clientes y por Spark.
     ports:
       - "9042:9042"
+    # Persistencia de tablas y datos de Cassandra.
     volumes:
       - cassandra_data:/var/lib/cassandra
     networks:
       - practica_net
+    # Comprueba periodicamente que Cassandra acepta consultas CQL.
     healthcheck:
       test: ["CMD", "cqlsh", "-e", "describe keyspaces"]
       interval: 30s
       timeout: 10s
       retries: 5
 
+  # MinIO actua como almacenamiento S3 para datos, modelos, checkpoints e Iceberg.
   minio:
     image: minio/minio
     container_name: minio
     ports:
+      # API S3 consumida por Spark mediante el conector S3A.
       - "9000:9000"
+      # Consola web de administracion de MinIO.
       - "9001:9001"
     environment:
+      # Credenciales de administrador usadas por los servicios de la practica.
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
+    # Sirve los objetos desde /data y fija la consola web en el puerto 9001.
     command: server /data --console-address ":9001"
+    # Mantiene los objetos almacenados al recrear el contenedor.
     volumes:
       - minio_data:/data
     networks:
       - practica_net
 
+  # Kafka transporta las solicitudes y respuestas de prediccion en tiempo real.
   kafka:
+    # Construye la imagen personalizada definida en docker/kafka.
     build: ./docker/kafka
     container_name: kafka
+    # Puerto del broker accesible desde el host.
     ports:
       - "9092:9092"
     environment:
+      # Nombre DNS anunciado a los demas contenedores de la red.
       KAFKA_ADVERTISED_HOST: kafka
     networks:
       - practica_net
+    # Verifica que el broker responde intentando listar sus topics.
     healthcheck:
       test: ["CMD", "/opt/kafka/bin/kafka-topics.sh", "--bootstrap-server", "localhost:9092", "--list"]
       interval: 30s
       timeout: 10s
       retries: 5
 
+  # Nodo maestro de Spark Standalone: coordina drivers y workers.
   spark-master:
+    # Los componentes Spark comparten la misma imagen personalizada.
     build: ./docker/spark
     container_name: spark-master
+    # Hace disponible el JAR de la aplicacion dentro del contenedor.
     volumes:
       - ./shared-jars:/shared-jars
+    # Inicia el proceso Master de Spark Standalone.
     command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
     ports:
+      # Interfaz web del master.
       - "8080:8080"
+      # Endpoint spark:// usado para registrar workers y enviar aplicaciones.
       - "7077:7077"
     environment:
       SPARK_MODE: master
     networks:
       - practica_net
 
+  # Primer worker de Spark: ejecuta drivers y tareas del cluster.
   spark-worker-1:
     build: ./docker/spark
     container_name: spark-worker-1
+    # Monta el mismo JAR que utiliza el master al enviar aplicaciones.
     volumes:
       - ./shared-jars:/shared-jars
+    # Registra el worker contra el master mediante su nombre DNS interno.
     command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
+    # Ordena iniciar el master antes que este worker.
     depends_on:
       - spark-master
     environment:
       SPARK_MODE: worker
+      # Recursos maximos ofrecidos por este worker al cluster.
       SPARK_WORKER_CORES: 2
       SPARK_WORKER_MEMORY: 2g
     networks:
       - practica_net
 
+  # Segundo worker de Spark, con la misma configuracion que el primero.
   spark-worker-2:
     build: ./docker/spark
     container_name: spark-worker-2
     volumes:
       - ./shared-jars:/shared-jars
+    # Se conecta al mismo master para ampliar los recursos disponibles.
     command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
     depends_on:
       - spark-master
     environment:
       SPARK_MODE: worker
+      # Recursos maximos ofrecidos por el segundo worker.
       SPARK_WORKER_CORES: 2
       SPARK_WORKER_MEMORY: 2g
     networks:
       - practica_net
 
+  # Cliente spark-submit que envia MakePrediction al cluster en modo cluster.
   spark-predictor:
     build: ./docker/spark
     container_name: spark-predictor
+    # Servicio opcional: solo arranca al activar el perfil "predictor".
     profiles:
       - predictor
+    # Inicia primero los sistemas externos requeridos por el predictor.
     depends_on:
       - kafka
       - mongo
@@ -113,7 +151,21 @@ services:
     environment:
       SPARK_USER: spark
     volumes:
+      # JAR que contiene la clase principal MakePrediction.
       - ./shared-jars:/shared-jars
+    # Configuracion principal de spark-submit:
+    # - master y deploy-mode envian el driver a un worker del cluster.
+    # - class selecciona la aplicacion de streaming MakePrediction.
+    # - waitAppCompletion=false permite terminar spark-submit tras el envio.
+    # - driver/executor/cores limitan los recursos usados por la aplicacion.
+    # - jars.ivy indica donde Spark guarda las dependencias descargadas.
+    # - spark.cassandra.connection.host conecta el sink con Cassandra.
+    # - spark.hadoop.fs.s3a.* configura MinIO como almacenamiento S3 sin TLS.
+    # - driverEnv.* pasa endpoints, credenciales y rutas al driver remoto.
+    # - extraJavaOptions replica esos valores como propiedades del proceso Java.
+    # - MODEL_BASE_PATH apunta a los modelos entrenados almacenados en MinIO.
+    # - CHECKPOINT_BASE_PATH conserva el progreso de Spark Structured Streaming.
+    # - KAFKA_BOOTSTRAP_SERVERS define el broker de entrada y salida.
     command: >
       /opt/spark/bin/spark-submit
       --master spark://spark-master:7077
@@ -148,18 +200,23 @@ services:
     networks:
       - practica_net
 
+  # Aplicacion web Flask: recibe peticiones y publica trabajos en Kafka.
   flask:
+    # Usa el proyecto como contexto y el Dockerfile especifico de Flask.
     build:
       context: .
       dockerfile: docker/flask/Dockerfile
     container_name: flask
+    # Publica la interfaz web y la API de prediccion.
     ports:
       - "5001:5001"
+    # Arranca despues de las bases de datos y del broker requeridos.
     depends_on:
       - mongo
       - cassandra
       - kafka
     environment:
+      # Rutas y nombres DNS internos usados por la aplicacion Flask.
       PROJECT_HOME: /app
       MONGO_URI: mongodb://mongo:27017
       CASSANDRA_HOST: cassandra
@@ -167,60 +224,82 @@ services:
     networks:
       - practica_net
 
+  # Prometheus recopila las metricas expuestas por los servicios.
   prometheus:
     image: prom/prometheus:latest
     container_name: prometheus
+    # Interfaz web y API de consultas PromQL.
     ports:
       - "9090:9090"
     volumes:
+      # Configuracion de targets del proyecto.
       - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      # Persistencia de series temporales.
       - prometheus_data:/prometheus
     networks:
       - practica_net
 
+  # Grafana visualiza las metricas almacenadas en Prometheus.
   grafana:
     image: grafana/grafana:latest
     container_name: grafana
+    # Interfaz web de Grafana.
     ports:
       - "3000:3000"
     environment:
+      # Contrasena inicial del usuario administrador.
       GF_SECURITY_ADMIN_PASSWORD: admin
     volumes:
+      # Datos internos, fuentes de datos y dashboards preconfigurados.
       - grafana_data:/var/lib/grafana
       - ./docker/grafana/provisioning:/etc/grafana/provisioning
       - ./docker/grafana/dashboards:/var/lib/grafana/dashboards
+    # Prometheus debe estar iniciado antes de cargar la fuente de datos.
     depends_on:
       - prometheus
     networks:
       - practica_net
 
+  # MLflow registra experimentos, metricas y versiones de los modelos.
   mlflow:
     image: ghcr.io/mlflow/mlflow:v2.19.0
     container_name: mlflow
+    # Expone el puerto interno 5000 de MLflow como 5002 en el host.
     ports:
       - "5002:5000"
+    # Escucha en todas las interfaces y utiliza cuatro procesos worker.
     command: mlflow server --host 0.0.0.0 --port 5000 --workers 4
+    # Persiste la informacion generada por el servidor MLflow.
     volumes:
       - mlflow_data:/mlflow
     networks:
       - practica_net
 
+  # Airflow programa y ejecuta el DAG de reentrenamiento del modelo.
   airflow:
+    # Imagen personalizada con el DAG y sus dependencias.
     build: ./docker/airflow
     container_name: airflow
+    # Necesita permisos para utilizar el socket Docker montado.
     user: root
+    # Interfaz web de Airflow: puerto 8081 del host.
     ports:
       - "8081:8080"
     environment:
+      # Ejecucion secuencial apropiada para este entorno de una sola instancia.
       AIRFLOW__CORE__EXECUTOR: SequentialExecutor
+      # Base de datos SQLite persistida en el volumen airflow_data.
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////opt/airflow/airflow.db
+      # Evita cargar los DAG de ejemplo incluidos por Airflow.
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__WEBSERVER__SECRET_KEY: practica_creativa_secret
     volumes:
+      # DAG del proyecto, estado de Airflow, acceso a Docker y recursos Spark.
       - ./docker/airflow/dags:/opt/airflow/dags
       - airflow_data:/opt/airflow
       - /var/run/docker.sock:/var/run/docker.sock
       - ./resources:/opt/spark/resources
+    # Migra la BD, crea el usuario admin y ejecuta webserver y scheduler.
     command: >
       bash -c "airflow db migrate &&
                airflow users create --username admin --password admin --firstname Admin --lastname Admin --role Admin --email admin@example.com 2>/dev/null || true &&
@@ -228,16 +307,22 @@ services:
     networks:
       - practica_net
 
+# Red bridge privada que permite resolver cada servicio por su nombre.
 networks:
   practica_net:
     driver: bridge
 
+# Volumenes administrados por Docker para conservar datos entre recreaciones.
 volumes:
+  # Datos de las bases de datos y almacenes persistentes.
   mongo_data:
   cassandra_data:
   minio_data:
+  # Cache declarada para dependencias Ivy de Spark.
   ivy_cache:
+  # Historicos y configuracion persistente de observabilidad.
   prometheus_data:
   grafana_data:
   mlflow_data:
+  # Base de datos, logs y estado local de Airflow.
   airflow_data:

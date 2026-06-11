@@ -1,8 +1,10 @@
+# ConfigMap con la configuracion que Prometheus leera como fichero.
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: prometheus-config
 data:
+  # Prometheus consulta cada 15 s sus propias metricas y las de flask:5001/metrics.
   prometheus.yml: |
     global:
       scrape_interval: 15s
@@ -15,6 +17,7 @@ data:
           - targets: ['flask:5001']
         metrics_path: '/metrics'
 ---
+# Deployment del servidor que recopila y permite consultar series temporales.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -36,14 +39,17 @@ spec:
         ports:
         - containerPort: 9090
         volumeMounts:
+        # subPath monta la clave prometheus.yml como un unico fichero.
         - name: config
           mountPath: /etc/prometheus/prometheus.yml
           subPath: prometheus.yml
       volumes:
+      # Proyecta el contenido del ConfigMap dentro del contenedor.
       - name: config
         configMap:
           name: prometheus-config
 ---
+# Publica la interfaz y API PromQL por el puerto 30909 de los nodos.
 apiVersion: v1
 kind: Service
 metadata:

@@ -105,6 +105,14 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
 prediction_store = {}
 
+@socketio.on('connect')
+def socketio_connect():
+    print("Socket.IO client connected", flush=True)
+
+@socketio.on('disconnect')
+def socketio_disconnect():
+    print("Socket.IO client disconnected", flush=True)
+
 def kafka_consumer_thread():
     while True:
         try:
@@ -124,6 +132,7 @@ def kafka_consumer_thread():
                     category = str(prediction.get('Prediction', 'unknown'))
                     flight_predictions_total.labels(category=category).inc()
                     socketio.emit('prediction_response', prediction)
+                    print("Socket.IO emit prediction_response UUID={}".format(uuid), flush=True)
         except Exception as exc:
             print("Kafka response consumer not ready: {}".format(exc), flush=True)
             time.sleep(5)

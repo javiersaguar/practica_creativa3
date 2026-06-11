@@ -1,3 +1,4 @@
+# Parche parcial para ajustar las variables de entorno del master Spark existente.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -15,4 +16,5 @@ spec:
         - name: SPARK_MASTER_PORT
           value: "7077"
         - name: SPARK_MASTER_HOST
+          # 0.0.0.0 indica al proceso que escuche en todas las interfaces del pod.
           value: "0.0.0.0"

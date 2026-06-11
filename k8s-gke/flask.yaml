@@ -1,3 +1,4 @@
+# Deployment de la API y pagina web que conecta usuarios, Kafka y bases de datos.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -14,11 +15,14 @@ spec:
     spec:
       containers:
       - name: flask
+        # Imagen propia publicada por practica.sh en Google Artifact Registry.
         image: europe-southwest1-docker.pkg.dev/project-6577bf93-e3eb-42be-8f6/practica/flask:latest
+        # Fuerza la comprobacion de una imagen nueva aunque se reutilice la etiqueta latest.
         imagePullPolicy: Always
         ports:
         - containerPort: 5001
         env:
+        # Los nombres kafka, mongo y cassandra se resuelven mediante Services de Kubernetes.
         - name: KAFKA_BOOTSTRAP_SERVERS
           value: "kafka:9092"
         - name: MONGO_URI
@@ -26,6 +30,7 @@ spec:
         - name: CASSANDRA_HOST
           value: "cassandra"
 ---
+# Expone Flask mediante un puerto fijo de cada nodo del cluster.
 apiVersion: v1
 kind: Service
 metadata:
@@ -37,4 +42,5 @@ spec:
   ports:
   - port: 5001
     targetPort: 5001
+    # Acceso externo: http://IP_DEL_NODO:30001.
     nodePort: 30001

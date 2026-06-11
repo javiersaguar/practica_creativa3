@@ -1,14 +1,17 @@
+# Reserva almacenamiento persistente para datos, modelos, checkpoints e Iceberg.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: minio-pvc
 spec:
+  # ReadWriteOnce permite montar el volumen en modo escritura desde un nodo cada vez.
   accessModes:
     - ReadWriteOnce
   resources:
     requests:
       storage: 10Gi
 ---
+# Deployment del servidor de objetos compatible con la API S3.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -23,6 +26,7 @@ spec:
       labels:
         app: minio
     spec:
+      # El volumen solicitado por el PVC se presenta al pod con el nombre minio-data.
       volumes:
       - name: minio-data
         persistentVolumeClaim:
@@ -31,19 +35,24 @@ spec:
       - name: minio
         image: minio/minio
         imagePullPolicy: Always
+        # Guarda objetos en /data y sirve la consola administrativa en 9001.
         args: ["server", "/data", "--console-address", ":9001"]
         ports:
+        # 9000 es la API S3; 9001 es la consola web.
         - containerPort: 9000
         - containerPort: 9001
         env:
+        # Credenciales usadas por Spark S3A y por los scripts de inicializacion.
         - name: MINIO_ROOT_USER
           value: "minioadmin"
         - name: MINIO_ROOT_PASSWORD
           value: "minioadmin"
         volumeMounts:
+        # Todo lo escrito en /data queda persistido en el PVC.
         - name: minio-data
           mountPath: /data
 ---
+# Publica tanto la API S3 como la consola mediante NodePort.
 apiVersion: v1
 kind: Service
 metadata:
@@ -53,10 +62,12 @@ spec:
   selector:
     app: minio
   ports:
+  # La API se usa internamente como minio:9000 y externamente por el 30900.
   - name: api
     port: 9000
     targetPort: 9000
     nodePort: 30900
+  # La consola web queda accesible por el puerto 30901 del nodo.
   - name: console
     port: 9001
     targetPort: 9001

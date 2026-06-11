@@ -1,3 +1,4 @@
+# Deployment de Grafana con datasource y dashboard aprovisionados automaticamente.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -19,9 +20,11 @@ spec:
         ports:
         - containerPort: 3000
         env:
+        # Contrasena inicial del usuario admin para la practica.
         - name: GF_SECURITY_ADMIN_PASSWORD
           value: "admin"
         volumeMounts:
+        # Cada ConfigMap se monta en la ruta que Grafana inspecciona al arrancar.
         - name: grafana-datasources
           mountPath: /etc/grafana/provisioning/datasources
         - name: grafana-dashboards-provisioning
@@ -29,16 +32,20 @@ spec:
         - name: grafana-dashboard-flight
           mountPath: /var/lib/grafana/dashboards
       volumes:
+      # Configuracion del datasource Prometheus.
       - name: grafana-datasources
         configMap:
           name: grafana-datasources
+      # Configuracion del proveedor que carga dashboards desde ficheros.
       - name: grafana-dashboards-provisioning
         configMap:
           name: grafana-dashboards-provisioning
+      # Dashboard JSON con las metricas concretas del pipeline.
       - name: grafana-dashboard-flight
         configMap:
           name: grafana-dashboard-flight
 ---
+# Service NodePort que publica la interfaz web de Grafana.
 apiVersion: v1
 kind: Service
 metadata:
@@ -52,6 +59,7 @@ spec:
     targetPort: 3000
     nodePort: 30300
 ---
+# ConfigMap que registra Prometheus como fuente de datos predeterminada.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -62,11 +70,14 @@ data:
     datasources:
     - name: Prometheus
       type: prometheus
+      # URL interna basada en el DNS del Service prometheus.
       url: http://prometheus:9090
+      # Grafana actua como proxy y el navegador no contacta directamente con Prometheus.
       access: proxy
       isDefault: true
 
 ---
+# Indica a Grafana que cargue dashboards desde /var/lib/grafana/dashboards.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -81,6 +92,8 @@ data:
       options:
         path: /var/lib/grafana/dashboards
 ---
+# Dashboard serializado como JSON dentro de una clave del ConfigMap.
+# Incluye totales, tasas, categorias y latencia p95; el JSON no admite comentarios internos.
 apiVersion: v1
 kind: ConfigMap
 metadata:

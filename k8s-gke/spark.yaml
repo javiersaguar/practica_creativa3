@@ -1,3 +1,4 @@
+# Deployment del master de Spark Standalone que coordina workers y aplicaciones.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -14,17 +15,21 @@ spec:
     spec:
       containers:
       - name: spark-master
+        # Imagen propia con Spark y el JAR de la practica.
         image: europe-southwest1-docker.pkg.dev/project-6577bf93-e3eb-42be-8f6/practica/spark-master:latest
         imagePullPolicy: Always
         command: ["/opt/spark/bin/spark-class"]
+        # --host 0.0.0.0 hace que el master escuche en todas las interfaces del pod.
         args: ["org.apache.spark.deploy.master.Master", "--host", "0.0.0.0"]
         ports:
+        # RPC del cluster, interfaz web, API REST y puertos fijos del driver.
         - containerPort: 7077
         - containerPort: 8080
         - containerPort: 6066   # standalone REST submit API
         - containerPort: 7078   # spark.driver.port
         - containerPort: 7079   # spark.blockManager.port
         env:
+        # HOME permite a Spark/Ivy escribir caches bajo el usuario spark.
         - name: SPARK_USER
           value: "spark"
         - name: HOME
@@ -32,8 +37,10 @@ spec:
         - name: SPARK_MASTER_PORT
           value: "7077"
         - name: SPARK_MASTER_HOST
+          # Nombre DNS estable con el que los workers localizan al master.
           value: "spark-master"
 ---
+# Service interno que agrupa los endpoints necesarios para Spark Standalone.
 apiVersion: v1
 kind: Service
 metadata:
@@ -52,6 +59,7 @@ spec:
     port: 6066
     targetPort: 6066
   - name: driver-ui
+    # La UI 4040 aparece cuando un driver se ejecuta en el pod del master.
     port: 4040
     targetPort: 4040
   - name: driver
@@ -61,6 +69,7 @@ spec:
     port: 7079
     targetPort: 7079
 ---
+# Service separado para publicar la interfaz web del master fuera de GKE.
 apiVersion: v1
 kind: Service
 metadata:
@@ -75,6 +84,7 @@ spec:
     targetPort: 8080
     nodePort: 30880
 ---
+# Deployment con dos workers que aportan CPU y memoria al cluster Spark.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -83,6 +93,7 @@ spec:
   replicas: 2
   strategy:
     rollingUpdate:
+      # No crea workers extra y permite sustituir uno cada vez.
       maxSurge: 0
       maxUnavailable: 1
     type: RollingUpdate
@@ -94,6 +105,7 @@ spec:
       labels:
         app: spark-worker
     spec:
+      # Tolera temporalmente nodos marcados con presion de memoria.
       tolerations:
       - key: "node.kubernetes.io/memory-pressure"
         operator: "Exists"
@@ -103,12 +115,15 @@ spec:
         image: europe-southwest1-docker.pkg.dev/project-6577bf93-e3eb-42be-8f6/practica/spark-worker:latest
         imagePullPolicy: Always
         command: ["/opt/spark/bin/spark-class"]
+        # Cada worker anuncia su IP de pod y se registra en spark-master:7077.
         args: ["org.apache.spark.deploy.worker.Worker", "--host", "$(MY_POD_IP)", "spark://spark-master:7077"]
         env:
+        # Downward API: Kubernetes inyecta dinamicamente la IP asignada al pod.
         - name: MY_POD_IP
           valueFrom:
             fieldRef:
               fieldPath: status.podIP
+        # Estas variables evitan que Spark anuncie un hostname no resoluble.
         - name: SPARK_LOCAL_IP
           value: "$(MY_POD_IP)"
         - name: SPARK_LOCAL_HOSTNAME
@@ -120,10 +135,12 @@ spec:
         - name: HOME
           value: "/home/spark"
         - name: SPARK_WORKER_MEMORY
+          # Recursos que el proceso Spark ofrece a las aplicaciones.
           value: "3g"
         - name: SPARK_WORKER_CORES
           value: "2"
         resources:
+          # Kubernetes reserva 0.5 CPU/3 GiB y permite alcanzar 2 CPU/4 GiB.
           requests:
             cpu: "500m"
             memory: "3Gi"

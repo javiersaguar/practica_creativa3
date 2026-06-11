@@ -1,3 +1,4 @@
+# Broker Kafka en modo de una sola instancia para peticiones y respuestas ML.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -14,14 +15,17 @@ spec:
     spec:
       containers:
       - name: kafka
+        # Imagen personalizada publicada en Artifact Registry.
         image: europe-southwest1-docker.pkg.dev/project-6577bf93-e3eb-42be-8f6/practica/kafka:latest
         imagePullPolicy: Always
         ports:
         - containerPort: 9092
         env:
+        # Kafka anuncia el DNS del Service para que otros pods puedan reconectar.
         - name: KAFKA_ADVERTISED_HOST
           value: "kafka"
 ---
+# Service ClusterIP interno que ofrece el broker como kafka:9092.
 apiVersion: v1
 kind: Service
 metadata:

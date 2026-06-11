@@ -1,4 +1,4 @@
-var socket = io();
+var socket = io({ transports: ['websocket'] });
 var currentUUID = null;
 var delayLabels = {
   0: 'Early or on time (< -15 min)',
@@ -6,6 +6,13 @@ var delayLabels = {
   2: 'Minor delay (0 to 30 min)',
   3: 'Severe delay (> 30 min)'
 };
+
+function renderPrediction(data) {
+  var pred = parseInt(data.Prediction);
+  var msg = delayLabels[pred] || 'Unknown: ' + pred;
+  document.getElementById('result').innerHTML = msg;
+}
+
 document.getElementById('flight_delay_classification').addEventListener('submit', function(e) {
   e.preventDefault();
   document.getElementById('result').innerHTML = 'Processing...';
@@ -19,11 +26,20 @@ document.getElementById('flight_delay_classification').addEventListener('submit'
   .then(function(r){return r.json();})
   .then(function(data){
     currentUUID = data.id;
-    window._pollForResult(currentUUID);
+  })
+  .catch(function(){
+    document.getElementById('result').innerHTML = 'Request error';
   });
 });
+
 socket.on('prediction_response', function(data) {
-  var pred = parseInt(data.Prediction);
-  var msg = delayLabels[pred] || 'Unknown: ' + pred;
-  document.getElementById('result').innerHTML = msg;
+  if (!currentUUID || data.UUID !== currentUUID) {
+    return;
+  }
+  renderPrediction(data);
+  currentUUID = null;
+});
+
+socket.on('connect_error', function() {
+  document.getElementById('result').innerHTML = 'WebSocket error';
 });

@@ -1,3 +1,4 @@
+# Deployment que envia la aplicacion MakePrediction al cluster Spark Standalone.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -14,27 +15,37 @@ spec:
     spec:
       containers:
       - name: spark-predictor
+        # Imagen propia que contiene Spark, conectores y el JAR de prediccion.
         image: europe-southwest1-docker.pkg.dev/project-6577bf93-e3eb-42be-8f6/practica/spark-predictor:latest
         imagePullPolicy: Always
         command: ["/opt/spark/bin/spark-submit"]
         ports:
+        # UI, RPC del driver y transferencia de bloques cuando el driver usa puertos fijos.
         - containerPort: 4040
         - containerPort: 7078
         - containerPort: 7079
         args:
+        # Envia la aplicacion al master Spark accesible por su Service.
         - "--master"
         - "spark://spark-master:7077"
+        # El driver se ejecuta dentro de un worker, no en este pod submitter.
         - "--deploy-mode"
         - "cluster"
+        # Spark reinicia automaticamente el driver si termina con error.
         - "--supervise"
+        # Clase principal de streaming incluida en el JAR.
         - "--class"
         - "es.upm.dit.ging.predictor.MakePrediction"
+        # Nombre DNS interno del Service Cassandra.
         - "--conf"
         - "spark.cassandra.connection.host=cassandra"
+        # Directorio donde Ivy descarga y reutiliza dependencias.
         - "--conf"
         - "spark.jars.ivy=/home/spark/.ivy2"
+        # Mantiene spark-submit esperando; el streaming normalmente no finaliza.
         - "--conf"
         - "spark.standalone.submit.waitAppCompletion=true"
+        # Recursos asignados al driver y al unico executor solicitado.
         - "--conf"
         - "spark.driver.cores=1"
         - "--conf"
@@ -47,6 +58,7 @@ spec:
         - "spark.executor.instances=1"
         - "--conf"
         - "spark.cores.max=2"
+        # Variables transferidas especificamente al driver remoto del modo cluster.
         - "--conf"
         - "spark.driverEnv.MODEL_BASE_PATH=s3a://flight-data/models"
         - "--conf"
@@ -63,24 +75,31 @@ spec:
         - "spark.driverEnv.MONGO_URI=mongodb://mongo:27017"
         - "--conf"
         - "spark.driverEnv.CASSANDRA_HOST=cassandra"
+        # Repite los valores como propiedades -D para codigo que usa System.getProperty.
         - "--conf"
         - "spark.driver.extraJavaOptions=-DKAFKA_BOOTSTRAP_SERVERS=kafka:9092 -DMONGO_URI=mongodb://mongo:27017 -DCASSANDRA_HOST=cassandra -DMODEL_BASE_PATH=s3a://flight-data/models -DCHECKPOINT_BASE_PATH=s3a://flight-data/checkpoints/predictor -DS3_ENDPOINT=http://minio:9000 -DAWS_ACCESS_KEY_ID=minioadmin -DAWS_SECRET_ACCESS_KEY=minioadmin"
+        # Configuracion Hadoop S3A para usar MinIO como almacenamiento S3.
         - "--conf"
         - "spark.hadoop.fs.s3a.endpoint=http://minio:9000"
         - "--conf"
         - "spark.hadoop.fs.s3a.access.key=minioadmin"
         - "--conf"
         - "spark.hadoop.fs.s3a.secret.key=minioadmin"
+        # MinIO necesita normalmente URLs por ruta: endpoint/bucket/objeto.
         - "--conf"
         - "spark.hadoop.fs.s3a.path.style.access=true"
         - "--conf"
         - "spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem"
         - "--conf"
         - "spark.hadoop.fs.s3a.connection.ssl.enabled=false"
+        # Lee directamente las claves configuradas, sin consultar metadatos cloud.
         - "--conf"
         - "spark.hadoop.fs.s3a.aws.credentials.provider=org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider"
+        # JAR local dentro de la imagen; file:/// indica una ruta del contenedor.
         - "file:///app/jars/flight_prediction_2.13-0.1.jar"
         env:
+        # Variables disponibles en el pod que ejecuta spark-submit.
+        # En cluster mode se repiten como driverEnv porque el driver corre en otro pod.
         - name: PROJECT_HOME
           value: "/app"
         - name: MODEL_BASE_PATH
@@ -106,6 +125,7 @@ spec:
         - name: IVY_HOME
           value: "/home/spark/.ivy2"
 ---
+# Service interno para acceder a la UI y puertos de comunicacion del driver.
 apiVersion: v1
 kind: Service
 metadata:
